@@ -641,6 +641,23 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["messages"], {})
         self.assertIn("prime_push", result["push_hint"])
 
+    async def call_prime_push(self):
+        from fastmcp import Client
+        from claude_chatter import mcp_server
+
+        protocol = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "pp.sock"), session_name="pp-test"
+        )
+        async with Client(mcp_server.build_mcp_server(protocol)) as client:
+            result = await client.call_tool("prime_push", {})
+        return json.loads(result.content[0].text)
+
+    async def test_prime_push_tells_the_agent_to_run_the_command(self):
+        result = await self.call_prime_push()
+        self.assertFalse(result["primed"])
+        self.assertIn("--prime", result["command"])
+        self.assertIn("Run `command` in your shell tool", result["next_step"])
+
     async def test_no_hint_outside_agy(self):
         result = await self.read_messages(["claude", "bash"])
         self.assertNotIn("push_hint", result)
