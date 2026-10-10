@@ -94,7 +94,7 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
         os.chdir(workspace)
         try:
             first = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p1.sock"))
-            self.assertTrue(first.session_name.startswith("antigravity-bridge-"))
+            self.assertEqual(first.session_name, f"bridge-{os.path.basename(workspace)}")
 
             first.persist_default_session_name("gwen")
 
@@ -106,6 +106,30 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
             name_file = os.path.expanduser(f"~/.claude/chatter-session-names/{digest}.name")
             if os.path.exists(name_file):
                 os.remove(name_file)
+
+    async def test_default_name_gets_digest_suffix_when_basename_in_use(self):
+        """Two workspaces with the same basename must not share a default name
+        while the first one's session is alive."""
+        workspace = tempfile.mkdtemp(prefix="name_clash_test_")
+        old_cwd = os.getcwd()
+        os.chdir(workspace)
+        sessions_dir = self.bridge.sessions_dir
+        os.makedirs(sessions_dir, exist_ok=True)
+        other = subprocess.Popen(["sleep", "30"])
+        other_json = os.path.join(sessions_dir, f"{other.pid}.clash-test.json")
+        try:
+            base = f"bridge-{os.path.basename(workspace)}"
+            with open(other_json, "w", encoding="utf-8") as f:
+                json.dump({"pid": other.pid, "name": base}, f)
+            clashing = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "c.sock"))
+            digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
+            self.assertEqual(clashing.session_name, f"{base}-{digest}")
+        finally:
+            other.kill()
+            other.wait()
+            os.chdir(old_cwd)
+            if os.path.exists(other_json):
+                os.remove(other_json)
 
     async def test_dead_session_purging(self):
         """Verify purging of dead session descriptors and key files."""
