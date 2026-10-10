@@ -49,11 +49,17 @@ def main():
     mode_group.add_argument("--list", action="store_true", help="List all active Claude Code sessions")
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--prime", action="store_true", help="From an Antigravity shell tool: hand this agy's push endpoint to its bridge so it can wake the session on inbound messages")
+    mode_group.add_argument("--prime-hook", action="store_true", help="Antigravity PreInvocation hook: reads hook JSON on stdin and prints the JSON that makes the session prime push (see --prime)")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
     args = parser.parse_args()
 
-    if args.prime:
+    if args.prime_hook:
+        from .hook import run
+        print(run(sys.stdin.read()))
+        sys.exit(0)
+
+    elif args.prime:
         from .prime import prime_from_shell
         result = prime_from_shell()
         print(json.dumps(result, indent=2))

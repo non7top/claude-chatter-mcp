@@ -1,0 +1,11 @@
+{
+  "claude-chatter-prime": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "bridge-mcp --prime-hook",
+        "timeout": 10
+      }
+    ]
+  }
+}

@@ -18,6 +18,8 @@ import subprocess
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from claude_chatter import ClaudeMessagingProtocol
 from claude_chatter.prime import AgyPoker, prime_command, _resolve_agy_executable
+from claude_chatter import prime as prime_module
+from claude_chatter.hook import decide as hook_decide
 
 
 class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
@@ -649,6 +651,50 @@ class TestPrimeCommand(unittest.TestCase):
         self.assertEqual(self.command(self.bin_dir), f"{self.python} -m claude_chatter.cli --prime")
 
 
+class TestPrimeHook(unittest.TestCase):
+    CONV = "0d0cec61-5de1-4454-8dc8-f088a36839d7"
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.primed_dir = os.path.join(self.tmp_dir.name, "primed")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def decide(self, now=None, **overrides):
+        data = {"conversationId": self.CONV, "workspacePaths": ["/work/space"]}
+        data.update(overrides)
+        return hook_decide(data, primed_dir=self.primed_dir, now=now)
+
+    def write_marker(self, pid):
+        os.makedirs(self.primed_dir, exist_ok=True)
+        with open(os.path.join(self.primed_dir, f"{self.CONV}.json"), "w", encoding="utf-8") as f:
+            json.dump({"bridge_pid": pid}, f)
+
+    def test_unprimed_injects_a_run_command_in_the_workspace(self):
+        step = self.decide()["injectSteps"][0]["toolCall"]
+        self.assertEqual(step["name"], "run_command")
+        self.assertEqual(step["args"]["CommandLine"], "bridge-mcp --prime")
+        self.assertEqual(step["args"]["Cwd"], "/work/space")
+
+    def test_primed_with_live_bridge_injects_nothing(self):
+        self.write_marker(os.getpid())
+        self.assertEqual(self.decide(), {})
+
+    def test_primed_marker_of_a_dead_bridge_injects_again(self):
+        self.write_marker(9999999)
+        self.assertIn("injectSteps", self.decide())
+
+    def test_does_not_retry_within_the_window_but_does_after(self):
+        self.assertIn("injectSteps", self.decide(now=1000.0))
+        self.assertEqual(self.decide(now=time.time() + 5), {})
+        self.assertIn("injectSteps", self.decide(now=time.time() + 700))
+
+    def test_unsafe_or_missing_conversation_id_is_ignored(self):
+        self.assertEqual(self.decide(conversationId="../x"), {})
+        self.assertEqual(self.decide(conversationId=None), {})
+
+
 class TestResolveAgyExecutable(unittest.TestCase):
     class FakeAgy:
         def __init__(self, exe, argv0):
@@ -757,6 +803,10 @@ class TestAgyPoker(unittest.IsolatedAsyncioTestCase):
         os.chmod(self.agy_path, 0o755)
         self.set_reply({"response": {}})
         os.environ["FAKE_AGY_OUT"] = self.out
+        self.primed_dir = os.path.join(self.tmp_dir.name, "primed")
+        from unittest import mock
+        self.primed_dir_patch = mock.patch.object(prime_module, "PRIMED_DIR", self.primed_dir)
+        self.primed_dir_patch.start()
         self.poker = AgyPoker(debounce_seconds=0.1)
         self.ctl_path = os.path.join(self.tmp_dir.name, "ctl.sock")
         self.server = asyncio.create_task(self.poker.serve_control_socket(self.ctl_path))
@@ -769,6 +819,7 @@ class TestAgyPoker(unittest.IsolatedAsyncioTestCase):
         except asyncio.CancelledError:
             pass
         os.environ.pop("FAKE_AGY_OUT", None)
+        self.primed_dir_patch.stop()
         self.tmp_dir.cleanup()
 
     def set_reply(self, reply):
@@ -799,6 +850,21 @@ class TestAgyPoker(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply["ok"])
         self.assertNotIn(self.TOKEN, json.dumps(reply))
         self.assertTrue(self.poker.primed)
+
+    async def test_prime_writes_marker_and_unavailable_removes_it(self):
+        await self.control(self.prime_request())
+        marker = os.path.join(self.primed_dir, "conv-1.json")
+        with open(marker, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["bridge_pid"], os.getpid())
+        self.set_reply({"error": "rpc error: code = Unavailable"})
+        self.poker.notify("a")
+        await asyncio.sleep(0.5)
+        self.assertFalse(os.path.exists(marker))
+
+    async def test_prime_rejects_unsafe_conversation_id(self):
+        reply = await self.control(self.prime_request(conversation_id="../../etc/x"))
+        self.assertFalse(reply["ok"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir.name, "etc")))
 
     async def test_prime_rejects_non_loopback_address(self):
         reply = await self.control(self.prime_request(ls_address="evil.example.com:443"))
