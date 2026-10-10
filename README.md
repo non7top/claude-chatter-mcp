@@ -125,7 +125,7 @@ Manually triggers proactive scanning and deletion of dead socket descriptors and
 ### 5. `rename_session`
 Renames this bridge's announced session descriptor in `~/.claude/sessions/` so surrounding Claude Code processes discover it under the new name via `ListAgents`.
 * **Arguments**:
-  * `new_name` (string, required): The new session name to announce (e.g. `antigravity-dev-bridge`).
+  * `new_name` (string, required): The new session name to announce (e.g. `bridge-dev`). Without a rename, the name defaults to `bridge-<cwd basename>`; override it with `--name` or `CHATTER_SESSION_NAME`.
 
 ---
 

@@ -42,10 +42,10 @@ class ClaudeMessagingProtocol:
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
         self.on_inbound_message = on_inbound_message
 
-        env_name = os.environ.get("AGY_SESSION_NAME")
+        env_name = os.environ.get("CHATTER_SESSION_NAME") or os.environ.get("AGY_SESSION_NAME")
         self.session_name = session_name or env_name or self._derive_default_session_name()
 
-        env_socket = os.environ.get("AGY_MCP_BRIDGE_SOCKET")
+        env_socket = os.environ.get("CHATTER_BRIDGE_SOCKET") or os.environ.get("AGY_MCP_BRIDGE_SOCKET")
         if bridge_socket_path:
             self.bridge_socket_path = bridge_socket_path
         elif env_socket:
@@ -67,14 +67,16 @@ class ClaudeMessagingProtocol:
 
     def _derive_default_session_name(self) -> str:
         """
-        Derives a stable, per-workspace default session name from cwd so that
-        unrelated bridge instances (different Antigravity workspaces) never
-        collide on the same socket, while the same workspace reconnecting
-        across MCP host restarts always resolves back to the same identity.
+        Derives a stable, per-workspace default session name from cwd,
+        "bridge-<cwd basename>", so the name says which workspace it is. The
+        host (e.g. Antigravity) doesn't pass a session name, so cwd is the only
+        tangible identity available. If another live session already uses
+        that name (two workspaces with the same basename), the cwd digest is
+        appended so they never collide on the same socket.
 
         If rename_session was ever called for this workspace, its persisted
         name (one small file per cwd digest, so unrelated workspaces never
-        contend on the same file) wins over the cwd-hash default - a rename
+        contend on the same file) wins over the derived default - a rename
         is otherwise only in-memory and reverts on the next process restart,
         which happens often (every MCP host reload).
         """
@@ -86,13 +88,29 @@ class ClaudeMessagingProtocol:
                     return persisted
         except OSError:
             pass
-        return f"antigravity-bridge-{cwd_digest}"
+        basename = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(os.getcwd())) or "root"
+        name = f"bridge-{basename}"
+        if self._session_name_in_use(name):
+            name = f"{name}-{cwd_digest}"
+        return name
+
+    def _session_name_in_use(self, name: str) -> bool:
+        for path in glob.glob(os.path.join(self.sessions_dir, "*.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            pid = meta.get("pid")
+            if meta.get("name") == name and pid != self.pid and self._is_pid_alive(pid):
+                return True
+        return False
 
     def persist_default_session_name(self, name: str):
         """
         Remembers `name` as this workspace's default session name for future
         process starts (see _derive_default_session_name). Only meaningful
-        for the cwd-derived default - an explicit --name/AGY_SESSION_NAME
+        for the cwd-derived default - an explicit --name/CHATTER_SESSION_NAME
         override always wins regardless of what's persisted here.
         """
         try:
@@ -103,7 +121,7 @@ class ClaudeMessagingProtocol:
             logger.error(f"Failed to persist session name '{name}': {e}")
 
     def _get_default_socket_path(self, pid: int, session_name: Optional[str] = None) -> str:
-        sname = (session_name or getattr(self, "session_name", "antigravity-bridge")).replace("/", "-")
+        sname = (session_name or getattr(self, "session_name", "bridge")).replace("/", "-")
         try:
             uid = os.getuid()
             cc_socks_dir = f"/run/user/{uid}/cc-socks"
@@ -390,7 +408,7 @@ class ClaudeMessagingProtocol:
         except (OSError, IndexError):
             return str(pid)
 
-    def register_session_descriptor(self, session_name: str = "antigravity-bridge", kind: str = "bg"):
+    def register_session_descriptor(self, session_name: str = "bridge", kind: str = "bg"):
         """
         Registers a session descriptor in ~/.claude/sessions/ so that surrounding
         Claude Code processes can discover and message this bridge via ListAgents.
