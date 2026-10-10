@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("SocketBridgeMCP")
 
+PRIMED_DIR = os.path.join(os.path.expanduser("~"), ".claude", "chatter-primed")
+_CONVERSATION_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 ENV_KEYS = ("ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN")
 # The token is handed to an agy child that connects to this address, so a
 # non-loopback address would send it somewhere else.
@@ -105,6 +107,8 @@ class AgyPoker:
         conv, address, token, agy_path = (req.get(k) for k in ("conversation_id", "ls_address", "csrf_token", "agy_path"))
         if not all(isinstance(v, str) and v for v in (conv, address, token, agy_path)):
             return {"ok": False, "error": "conversation_id, ls_address, csrf_token and agy_path are required strings"}
+        if not _CONVERSATION_ID.match(conv):
+            return {"ok": False, "error": "conversation_id has an unexpected format"}
         if not _LOOPBACK_ADDRESS.match(address):
             return {"ok": False, "error": "ls_address must be a loopback host:port"}
         if not (os.path.isabs(agy_path) and os.access(agy_path, os.X_OK)):
@@ -112,8 +116,29 @@ class AgyPoker:
 
         self._endpoint = {"conversation_id": conv, "ls_address": address, "csrf_token": token, "agy_path": agy_path}
         self.last_error = None
+        self._write_primed_marker(conv)
         logger.info(f"Primed push into agy conversation {conv} via {address}.")
         return {"ok": True, "conversation_id": conv, "ls_address": address}
+
+    def _primed_marker_path(self, conv: str) -> str:
+        return os.path.join(PRIMED_DIR, f"{conv}.json")
+
+    def _write_primed_marker(self, conv: str):
+        # Lets the --prime-hook cheaply tell "already primed" without the token.
+        try:
+            os.makedirs(PRIMED_DIR, exist_ok=True)
+            with open(self._primed_marker_path(conv), "w", encoding="utf-8") as f:
+                json.dump({"bridge_pid": os.getpid(), "conversation_id": conv}, f)
+        except OSError as e:
+            logger.error(f"Failed to write primed marker: {e}")
+
+    def _drop_endpoint(self):
+        if self._endpoint is not None:
+            try:
+                os.remove(self._primed_marker_path(self._endpoint["conversation_id"]))
+            except OSError:
+                pass
+        self._endpoint = None
 
     def notify(self, sender: str):
         if self._endpoint is None:
@@ -164,7 +189,7 @@ class AgyPoker:
             self.last_error = str(error)[:300]
             logger.error(f"Push to agy failed: {self.last_error}")
             if "Unavailable" in self.last_error:
-                self._endpoint = None  # agy is gone; a stale credential is worth nothing
+                self._drop_endpoint()  # agy is gone; a stale credential is worth nothing
             return
         self.last_error = None
         logger.info("Poked agy conversation about new inbox messages.")
