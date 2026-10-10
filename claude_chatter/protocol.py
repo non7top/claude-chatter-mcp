@@ -435,7 +435,8 @@ class ClaudeMessagingProtocol:
 
         key_data = {
             "peerToken": self.registered_token,
-            "procStart": session_data["procStart"]
+            "procStart": session_data["procStart"],
+            "pidDomain": session_data["pidDomain"]
         }
 
         try:
@@ -443,7 +444,7 @@ class ClaudeMessagingProtocol:
                 json.dump(session_data, f, indent=2)
             with open(self.named_descriptor_path, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2)
-            with open(self.session_key_path, "w", encoding="utf-8") as f:
+            with open(os.open(self.session_key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
                 json.dump(key_data, f, indent=2)
             logger.info(f"🚀 Registered bridge session descriptor '{session_name}' (PID {self.registered_pid}) in {self.sessions_dir}")
         except Exception as e:
@@ -533,22 +534,9 @@ class ClaudeMessagingProtocol:
                             "timestamp": time.time()
                         })
 
-                    # Confirms receipt only - not that anything will act on it
-                    # promptly, or at all. This is an async mailbox: the other
-                    # side (a human or model) has to independently check
-                    # read_messages/get_responses to see it, so "received" here
-                    # must not be read as "seen" or "handled".
-                    ack = json.dumps({
-                        "status": "received",
-                        "msg_id": msg_id,
-                        "mode": "async-mailbox",
-                        "note": "Buffered for manual/periodic pickup via read_messages - no guaranteed prompt processing or reaction."
-                    }) + "\n"
-                    try:
-                        writer.write(ack.encode("utf-8"))
-                        await writer.drain()
-                    except (ConnectionResetError, BrokenPipeError):
-                        pass
+                    # No reply on purpose: Claude Code's sender reports "Failed to
+                    # send" if the peer writes anything back, even though the
+                    # message was buffered.
 
                 except json.JSONDecodeError:
                     logger.error("Received invalid JSON payload over inbound bridge socket")
