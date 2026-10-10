@@ -17,7 +17,7 @@ import subprocess
 # Ensure repo directory is in path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from claude_chatter import ClaudeMessagingProtocol
-from claude_chatter.prime import AgyPoker
+from claude_chatter.prime import AgyPoker, prime_command, _resolve_agy_executable
 
 
 class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
@@ -602,6 +602,73 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                     os.remove(socket_path)
                 except OSError:
                     pass
+
+
+class TestPrimeCommand(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.bin_dir = os.path.join(self.tmp_dir.name, "bin")
+        os.makedirs(self.bin_dir)
+        self.script = os.path.join(self.bin_dir, "bridge-mcp")
+        with open(self.script, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(self.script, 0o755)
+        self.python = os.path.join(self.bin_dir, "python3")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def command(self, on_path):
+        with self.mock.patch("claude_chatter.prime.sys.executable", self.python), \
+                self.mock.patch("claude_chatter.prime.shutil.which", return_value=on_path):
+            return prime_command()
+
+    def test_short_form_when_the_install_is_on_path(self):
+        self.assertEqual(self.command(self.script), "bridge-mcp --prime")
+
+    def test_script_path_when_not_on_path(self):
+        self.assertEqual(self.command(None), f"{self.script} --prime")
+
+    def test_script_path_when_a_different_install_is_on_path(self):
+        self.assertEqual(self.command("/usr/bin/bridge-mcp"), f"{self.script} --prime")
+
+    def test_module_form_when_no_console_script_exists(self):
+        os.remove(self.script)
+        self.assertEqual(self.command(None), f"{self.python} -m claude_chatter.cli --prime")
+
+
+class TestResolveAgyExecutable(unittest.TestCase):
+    class FakeAgy:
+        def __init__(self, exe, argv0):
+            self._exe, self._argv0 = exe, argv0
+
+        def exe(self):
+            return self._exe
+
+        def cmdline(self):
+            return [self._argv0]
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.live = os.path.join(self.tmp_dir.name, "agy")
+        with open(self.live, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(self.live, 0o755)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_uses_exe_when_it_exists(self):
+        self.assertEqual(_resolve_agy_executable(self.FakeAgy(self.live, "x")), self.live)
+
+    def test_falls_back_to_argv0_when_exe_is_the_renamed_old_binary(self):
+        stale = os.path.join(self.tmp_dir.name, "agy.1791616514046907586.old")
+        self.assertEqual(_resolve_agy_executable(self.FakeAgy(stale, self.live)), self.live)
+
+    def test_falls_back_to_argv0_when_exe_is_empty(self):
+        self.assertEqual(_resolve_agy_executable(self.FakeAgy("", self.live)), self.live)
 
 
 class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):

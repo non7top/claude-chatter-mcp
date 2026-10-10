@@ -4,9 +4,7 @@ transport, tool schema generation, and standard notifications; this module
 wires ClaudeMessagingProtocol into it and holds nothing else.
 """
 import os
-import sys
 import json
-import shlex
 import signal
 import asyncio
 import logging
@@ -19,7 +17,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
 from .protocol import ClaudeMessagingProtocol
-from .prime import AgyPoker, control_socket_path
+from .prime import AgyPoker, control_socket_path, prime_command
 
 logger = logging.getLogger("SocketBridgeMCP")
 
@@ -186,7 +184,7 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     @mcp.tool()
     async def prime_push() -> str:
         """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
-        command = f"{shlex.quote(sys.executable)} -m claude_chatter.cli --prime"
+        command = prime_command()
         result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
         if not poker.primed:
             result["next_step"] = (

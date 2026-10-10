@@ -12,8 +12,11 @@ the agy child process through its environment, never argv or logs.
 """
 import os
 import re
+import sys
 import json
 import glob
+import shlex
+import shutil
 import socket
 import asyncio
 import logging
@@ -27,6 +30,17 @@ ENV_KEYS = ("ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVIT
 # non-loopback address would send it somewhere else.
 _LOOPBACK_ADDRESS = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\]):\d{1,5}$")
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def prime_command() -> str:
+    """The shortest shell command that runs this install's own `--prime`."""
+    script = os.path.join(os.path.dirname(sys.executable), "bridge-mcp")
+    if not os.path.exists(script):
+        return f"{shlex.quote(sys.executable)} -m claude_chatter.cli --prime"
+    on_path = shutil.which("bridge-mcp")
+    if on_path and os.path.realpath(on_path) == os.path.realpath(script):
+        return "bridge-mcp --prime"
+    return f"{shlex.quote(script)} --prime"
 
 
 def control_socket_path(bridge_socket_path: str) -> str:
@@ -153,6 +167,19 @@ def _find_agy_ancestor() -> Optional[psutil.Process]:
     return next((p for p in psutil.Process().parents() if p.name() == "agy"), None)
 
 
+def _resolve_agy_executable(agy: psutil.Process) -> Optional[str]:
+    # After a self-update the running agy's /proc exe points at a deleted,
+    # renamed binary, so exe() is not usable; its argv[0] is the live path.
+    candidates = []
+    for get in (agy.exe, lambda: agy.cmdline()[0]):
+        try:
+            candidates.append(get())
+        except (psutil.Error, IndexError):
+            pass
+    candidates.append(shutil.which("agy"))
+    return next((c for c in candidates if c and os.path.isabs(c) and os.access(c, os.X_OK)), None)
+
+
 def prime_from_shell() -> Dict[str, Any]:
     """
     Client side of --prime: runs in agy's shell tool, finds the bridge that
@@ -165,10 +192,9 @@ def prime_from_shell() -> Dict[str, Any]:
     agy = _find_agy_ancestor()
     if agy is None:
         return {"ok": False, "error": "no agy process found above this shell"}
-    try:
-        agy_path = agy.exe()
-    except psutil.Error as e:
-        return {"ok": False, "error": f"cannot resolve agy executable: {e}"}
+    agy_path = _resolve_agy_executable(agy)
+    if agy_path is None:
+        return {"ok": False, "error": "cannot locate the agy executable"}
 
     sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
     bridges: Dict[int, str] = {}
