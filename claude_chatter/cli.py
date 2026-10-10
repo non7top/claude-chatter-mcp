@@ -48,11 +48,18 @@ def main():
     mode_group.add_argument("--standalone", "--daemon", action="store_true", help="Run as standalone daemon server without stdio MCP loop")
     mode_group.add_argument("--list", action="store_true", help="List all active Claude Code sessions")
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
+    mode_group.add_argument("--prime", action="store_true", help="From an Antigravity shell tool: hand this agy's push endpoint to its bridge so it can wake the session on inbound messages")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
     args = parser.parse_args()
 
-    if args.list:
+    if args.prime:
+        from .prime import prime_from_shell
+        result = prime_from_shell()
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("ok") else 1)
+
+    elif args.list:
         protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
 
         async def _cmd_list():
