@@ -609,34 +609,44 @@ class TestPrimeCommand(unittest.TestCase):
         from unittest import mock
         self.mock = mock
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.bin_dir = os.path.join(self.tmp_dir.name, "bin")
-        os.makedirs(self.bin_dir)
+        self.bin_dir = self.make_bin_dir("venv-bin")
         self.script = os.path.join(self.bin_dir, "bridge-mcp")
-        with open(self.script, "w", encoding="utf-8") as f:
-            f.write("#!/bin/sh\n")
-        os.chmod(self.script, 0o755)
         self.python = os.path.join(self.bin_dir, "python3")
 
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def command(self, on_path):
+    def make_bin_dir(self, name):
+        d = os.path.join(self.tmp_dir.name, name)
+        os.makedirs(d)
+        script = os.path.join(d, "bridge-mcp")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(script, 0o755)
+        return d
+
+    def command(self, *path_dirs):
         with self.mock.patch("claude_chatter.prime.sys.executable", self.python), \
-                self.mock.patch("claude_chatter.prime.shutil.which", return_value=on_path):
+                self.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(path_dirs)}):
             return prime_command()
 
-    def test_short_form_when_the_install_is_on_path(self):
-        self.assertEqual(self.command(self.script), "bridge-mcp --prime")
+    def test_short_form_when_a_link_to_this_install_is_on_path(self):
+        link_dir = os.path.join(self.tmp_dir.name, "local-bin")
+        os.makedirs(link_dir)
+        os.symlink(self.script, os.path.join(link_dir, "bridge-mcp"))
+        self.assertEqual(self.command(link_dir, self.bin_dir), "bridge-mcp --prime")
 
-    def test_script_path_when_not_on_path(self):
-        self.assertEqual(self.command(None), f"{self.script} --prime")
+    def test_script_path_when_only_this_installs_own_bin_is_on_path(self):
+        # What `uv run` does: the venv bin is on the bridge's PATH but not the agent shell's.
+        self.assertEqual(self.command(self.bin_dir), f"{self.script} --prime")
 
     def test_script_path_when_a_different_install_is_on_path(self):
-        self.assertEqual(self.command("/usr/bin/bridge-mcp"), f"{self.script} --prime")
+        other = self.make_bin_dir("other-install")
+        self.assertEqual(self.command(other, self.bin_dir), f"{self.script} --prime")
 
     def test_module_form_when_no_console_script_exists(self):
         os.remove(self.script)
-        self.assertEqual(self.command(None), f"{self.python} -m claude_chatter.cli --prime")
+        self.assertEqual(self.command(self.bin_dir), f"{self.python} -m claude_chatter.cli --prime")
 
 
 class TestResolveAgyExecutable(unittest.TestCase):

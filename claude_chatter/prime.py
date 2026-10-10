@@ -34,10 +34,17 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 def prime_command() -> str:
     """The shortest shell command that runs this install's own `--prime`."""
-    script = os.path.join(os.path.dirname(sys.executable), "bridge-mcp")
+    bin_dir = os.path.dirname(sys.executable)
+    script = os.path.join(bin_dir, "bridge-mcp")
     if not os.path.exists(script):
         return f"{shlex.quote(sys.executable)} -m claude_chatter.cli --prime"
-    on_path = shutil.which("bridge-mcp")
+    # `uv run` puts the project venv's bin on this process's PATH only; the
+    # agent's shell won't have it, so don't count that directory as "on PATH".
+    other_dirs = [
+        d for d in os.environ.get("PATH", "").split(os.pathsep)
+        if d and os.path.realpath(d) != os.path.realpath(bin_dir)
+    ]
+    on_path = shutil.which("bridge-mcp", path=os.pathsep.join(other_dirs))
     if on_path and os.path.realpath(on_path) == os.path.realpath(script):
         return "bridge-mcp --prime"
     return f"{shlex.quote(script)} --prime"
