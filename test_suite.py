@@ -604,6 +604,48 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                     pass
 
 
+class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+
+    async def asyncTearDown(self):
+        self.tmp_dir.cleanup()
+
+    async def read_messages(self, ancestor_names):
+        from unittest import mock
+        from fastmcp import Client
+        from claude_chatter import mcp_server
+
+        class FakeProc:
+            def __init__(self, name):
+                self._name = name
+
+            def name(self):
+                return self._name
+
+        class FakeSelf:
+            def parents(self):
+                return [FakeProc(n) for n in ancestor_names]
+
+        protocol = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "hint.sock"), session_name="hint-test"
+        )
+        with mock.patch.object(mcp_server.psutil, "Process", return_value=FakeSelf()):
+            server = mcp_server.build_mcp_server(protocol)
+        async with Client(server) as client:
+            result = await client.call_tool("read_messages", {})
+        return json.loads(result.content[0].text)
+
+    async def test_hint_present_under_agy_when_unprimed(self):
+        result = await self.read_messages(["uv", "agy", "bash"])
+        self.assertEqual(result["messages"], {})
+        self.assertIn("prime_push", result["push_hint"])
+
+    async def test_no_hint_outside_agy(self):
+        result = await self.read_messages(["claude", "bash"])
+        self.assertNotIn("push_hint", result)
+
+
 class TestAgyPoker(unittest.IsolatedAsyncioTestCase):
     TOKEN = "csrf-secret-for-test"
 

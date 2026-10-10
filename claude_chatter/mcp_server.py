@@ -10,6 +10,7 @@ import shlex
 import signal
 import asyncio
 import logging
+import psutil
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -24,16 +25,16 @@ logger = logging.getLogger("SocketBridgeMCP")
 
 INSTRUCTIONS = (
     "Bi-Directional AI Communication MCP Bridge for Claude Code sessions. "
-    "Nothing can interrupt you when a message arrives, so you must poll: "
-    "call read_messages at every opportunity - at the start of every turn, "
-    "before starting any piece of work, after finishing each piece of work, "
-    "between tool calls in long tasks, and before going idle or ending your "
-    "turn. Always call it again after a tools/list_changed notification; "
-    "that notification only signals that something arrived, the message "
-    "itself is never inline. An empty result is cheap, so over-checking is "
-    "better than missing a message. If you run inside Antigravity, call "
-    "prime_push once per conversation and run the shell command it returns: "
-    "that lets the bridge wake you when a message arrives."
+    "Nothing can interrupt you when a message arrives, so check read_messages "
+    "at the start of every turn, before and after each piece of work, and "
+    "before going idle or ending your turn. Do not poll in a loop to wait for "
+    "a reply: after sending, end your turn. A primed Antigravity session is "
+    "woken by the reply itself, and an idle Claude Code session may not reply "
+    "until someone prompts it. Always call read_messages after a "
+    "tools/list_changed notification; it only signals that something "
+    "arrived, never carries the message. If you run inside Antigravity, "
+    "call prime_push first thing in every conversation and run the shell "
+    "command it returns; until you do, nothing can wake you."
 )
 
 
@@ -94,6 +95,10 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
             logger.error(f"Failed to send tool_list_changed notification: {e}")
 
     poker = AgyPoker()
+    try:
+        under_agy = any(p.name() == "agy" for p in psutil.Process().parents())
+    except psutil.Error:
+        under_agy = False
 
     def on_inbound(method: str, params: Dict[str, Any]):
         notify_mcp_host(method, params)
@@ -169,9 +174,14 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 
     @mcp.tool()
     async def read_messages(mark_read: bool = True) -> str:
-        """Returns unread inbound messages (oldest first) - the inbox check for this async mailbox. Nothing can reliably interrupt you when a message arrives, so call this after a tools/list_changed notification, or periodically, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming)."""
-        unread = protocol.get_unread_messages(mark_read=mark_read)
-        return json.dumps(unread, indent=2)
+        """Returns {"messages": {...}} with unread inbound messages (oldest first) - the inbox check for this async mailbox. Nothing can reliably interrupt you when a message arrives, so call this after a tools/list_changed notification, or at the start of a turn and before going idle, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming). Adds a push_hint when this Antigravity session has not primed push yet."""
+        result: Dict[str, Any] = {"messages": protocol.get_unread_messages(mark_read=mark_read)}
+        if under_agy and not poker.primed:
+            result["push_hint"] = (
+                "Push is not primed, so nothing can wake you when a message arrives. "
+                "Call prime_push once and run the shell command it returns."
+            )
+        return json.dumps(result, indent=2)
 
     @mcp.tool()
     async def prime_push() -> str:
