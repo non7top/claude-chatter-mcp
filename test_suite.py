@@ -747,11 +747,10 @@ class TestPrimeHook(unittest.TestCase):
         with open(os.path.join(self.primed_dir, f"{self.CONV}.json"), "w", encoding="utf-8") as f:
             json.dump({"bridge_pid": pid}, f)
 
-    def test_unprimed_injects_a_run_command_in_the_workspace(self):
-        step = self.decide()["injectSteps"][0]["toolCall"]
-        self.assertEqual(step["name"], "run_command")
-        self.assertEqual(step["args"]["CommandLine"], "bridge-mcp --prime")
-        self.assertEqual(step["args"]["Cwd"], "/work/space")
+    def test_unprimed_injects_an_ephemeral_message_naming_enable_push(self):
+        step = self.decide()["injectSteps"][0]
+        self.assertEqual(list(step), ["ephemeralMessage"])
+        self.assertIn("enable_push", step["ephemeralMessage"])
 
     def test_primed_with_live_bridge_injects_nothing(self):
         self.write_marker(os.getpid())
@@ -838,9 +837,9 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
     async def test_hint_present_under_agy_when_unprimed(self):
         result = await self.read_messages(["uv", "agy", "bash"])
         self.assertEqual(result["messages"], {})
-        self.assertIn("prime_push", result["push_hint"])
+        self.assertIn("enable_push", result["push_hint"])
 
-    async def call_prime_push(self):
+    async def call_enable_push(self):
         from fastmcp import Client
         from claude_chatter import mcp_server
 
@@ -848,11 +847,11 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
             bridge_socket_path=os.path.join(self.tmp_dir.name, "pp.sock"), session_name="pp-test"
         )
         async with Client(mcp_server.build_mcp_server(protocol)) as client:
-            result = await client.call_tool("prime_push", {})
+            result = await client.call_tool("enable_push", {})
         return json.loads(result.content[0].text)
 
-    async def test_prime_push_tells_the_agent_to_run_the_command(self):
-        result = await self.call_prime_push()
+    async def test_enable_push_tells_the_agent_to_run_the_command(self):
+        result = await self.call_enable_push()
         self.assertFalse(result["primed"])
         self.assertIn("--prime", result["command"])
         self.assertIn("Run `command` in your shell tool", result["next_step"])

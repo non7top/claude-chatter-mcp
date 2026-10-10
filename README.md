@@ -105,12 +105,10 @@ agy mcp add claudemessaging bridge-mcp
 This repo is also an Antigravity CLI plugin: `plugin.json`, `mcp_config.json` (the MCP server), `hooks.json` (a `PreInvocation` hook that primes push, see below) and `rules/claude-chatter.md`.
 
 ```bash
-# 1. Put bridge-mcp on PATH (the plugin's MCP server and hook both run it by name)
-uv tool install git+https://github.com/non7top/claude-chatter-mcp.git   # or: uv tool install --editable .
-
-# 2. Install the plugin
-agy plugin install https://github.com/non7top/claude-chatter-mcp          # or: agy plugin install .
+agy plugin install https://github.com/non7top/claude-chatter-mcp
 ```
+
+Only `uv` needs to be installed: the plugin's MCP server and hook run `uvx --from git+https://github.com/non7top/claude-chatter-mcp bridge-mcp`, which fetches and caches the bridge on first use.
 
 If you registered the server by hand earlier (`agy mcp add ...`), remove it so the plugin's copy is the only one.
 
@@ -120,7 +118,7 @@ If you registered the server by hand earlier (`agy mcp add ...`), remove it so t
 
 `agy` cannot be woken by an MCP server, so by default it only sees inbound messages when it calls `read_messages`. Push closes that gap using `agy agentapi send-message`, which needs `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. `agy` gives those only to its agent's shell tool, never to MCP servers, so each conversation has to be **primed** once:
 
-1. The agent calls the `prime_push` tool, which returns a shell command (`bridge-mcp --prime`).
+1. The agent calls the `enable_push` tool, which returns a shell command (`bridge-mcp --prime`).
 2. The agent runs that command in its shell tool. It reads its own `ANTIGRAVITY_*` environment and hands it to its bridge over a `0600` control socket (`<bridge socket>.ctl`). The token is kept in memory only and passed to `agy` through the child's environment, never argv, logs or disk.
 3. From then on every inbound message makes the bridge run `agy agentapi send-message` with a fixed notice ("N new message(s) in your bridge inbox, call `read_messages`"). No sender-written text is injected.
 
@@ -156,7 +154,7 @@ Queries the full inbound and outbound message history cached in memory, regardle
 * **Arguments**:
   * `msg_id` (string, optional): Specific message ID filter.
 
-### 6. `prime_push`
+### 6. `enable_push`
 Returns the shell command that primes push for this conversation (see above) and whether push is already primed.
 * **Arguments**: None
 

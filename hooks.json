@@ -3,8 +3,8 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "bridge-mcp --prime-hook",
-        "timeout": 10
+        "command": "uvx --from git+https://github.com/non7top/claude-chatter-mcp bridge-mcp --prime-hook",
+        "timeout": 30
       }
     ]
   }

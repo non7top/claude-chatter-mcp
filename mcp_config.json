@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "claude-chatter": {
-      "command": "bridge-mcp"
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/non7top/claude-chatter-mcp", "bridge-mcp"]
     }
   }
 }

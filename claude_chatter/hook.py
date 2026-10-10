@@ -4,8 +4,9 @@ conversation is primed for push (see prime.py). Pure stdlib and cheap, since it
 runs before every model invocation.
 
 A hook process does not get the language-server token, so it cannot prime by
-itself. Instead it injects a run_command step that runs `bridge-mcp --prime`
-in the agent's own shell, where the token exists.
+itself. Instead it injects an ephemeralMessage telling the agent to call
+`enable_push` and run the command it returns in its own shell, where the token
+exists.
 """
 import os
 import re
@@ -17,6 +18,11 @@ PRIMED_DIR = os.path.join(os.path.expanduser("~"), ".claude", "chatter-primed")
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 # A failed priming must not be retried before every model invocation.
 RETRY_AFTER_SECONDS = 600
+PRIME_NOTICE = (
+    "[claude-chatter] Push is not enabled for this conversation, so messages from other "
+    "sessions cannot wake you. Before anything else, call the enable_push tool and run the "
+    "shell command it returns, exactly as given. Then continue with the user's request."
+)
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -57,22 +63,7 @@ def decide(hook_input: Dict[str, Any], primed_dir: str = PRIMED_DIR, now: Option
     except OSError:
         return {}
 
-    workspaces = hook_input.get("workspacePaths")
-    cwd = workspaces[0] if isinstance(workspaces, list) and workspaces else os.getcwd()
-    return {
-        "injectSteps": [{
-            "toolCall": {
-                "name": "run_command",
-                "args": {
-                    "CommandLine": "bridge-mcp --prime",
-                    "Cwd": cwd,
-                    "WaitMsBeforeAsync": 5000,
-                    "toolAction": "Priming claude-chatter push so messages can wake this session",
-                    "toolSummary": "Prime claude-chatter push",
-                },
-            }
-        }]
-    }
+    return {"injectSteps": [{"ephemeralMessage": PRIME_NOTICE}]}
 
 
 def run(stdin_text: str) -> str:
