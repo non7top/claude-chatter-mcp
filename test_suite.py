@@ -213,11 +213,9 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
         writer.write((json.dumps(msg_frame) + "\n").encode("utf-8"))
         await writer.drain()
 
-        # Read ACK
-        ack_line = await reader.readline()
-        ack_data = json.loads(ack_line.decode("utf-8"))
-        self.assertEqual(ack_data.get("status"), "received")
-        self.assertEqual(ack_data.get("msg_id"), msg_id)
+        # The listener must not reply: Claude Code's sender treats any reply as a send failure
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readline(), timeout=0.3)
 
         writer.close()
         await writer.wait_closed()
@@ -262,7 +260,7 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
         }
         writer.write((json.dumps(real_frame) + "\n").encode("utf-8"))
         await writer.drain()
-        await reader.readline()
+        await asyncio.sleep(0.2)
         writer.close()
         await writer.wait_closed()
 

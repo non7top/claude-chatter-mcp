@@ -21,9 +21,14 @@ logger = logging.getLogger("SocketBridgeMCP")
 
 INSTRUCTIONS = (
     "Bi-Directional AI Communication MCP Bridge for Claude Code sessions. "
-    "When you receive a tools/list_changed notification, call read_messages "
-    "to see what's new - inbound messages arrive that way, not inline in the "
-    "notification itself."
+    "Nothing can interrupt you when a message arrives, so you must poll: "
+    "call read_messages at every opportunity - at the start of every turn, "
+    "before starting any piece of work, after finishing each piece of work, "
+    "between tool calls in long tasks, and before going idle or ending your "
+    "turn. Always call it again after a tools/list_changed notification; "
+    "that notification only signals that something arrived, the message "
+    "itself is never inline. An empty result is cheap, so over-checking is "
+    "better than missing a message."
 )
 
 
