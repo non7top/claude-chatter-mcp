@@ -189,8 +189,8 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    async def enable_push() -> str:
-        """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
+    async def enable_push(session_id: Optional[str] = None) -> str:
+        """Takes no meaningful input (session_id is accepted and ignored, since agents tend to pass it). Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
         command = prime_command()
         result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
         if not poker.primed:
