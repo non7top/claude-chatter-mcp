@@ -690,6 +690,7 @@ class TestPrimeCommand(unittest.TestCase):
         self.bin_dir = self.make_bin_dir("venv-bin")
         self.script = os.path.join(self.bin_dir, "bridge-mcp")
         self.python = os.path.join(self.bin_dir, "python3")
+        self.stable_link = os.path.join(self.tmp_dir.name, "chatter-bin", "bridge-mcp")
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -706,7 +707,7 @@ class TestPrimeCommand(unittest.TestCase):
     def command(self, *path_dirs):
         with self.mock.patch("claude_chatter.prime.sys.executable", self.python), \
                 self.mock.patch.dict(os.environ, {"PATH": os.pathsep.join(path_dirs)}):
-            return prime_command()
+            return prime_command(stable_link=self.stable_link)
 
     def test_short_form_when_a_link_to_this_install_is_on_path(self):
         link_dir = os.path.join(self.tmp_dir.name, "local-bin")
@@ -714,13 +715,30 @@ class TestPrimeCommand(unittest.TestCase):
         os.symlink(self.script, os.path.join(link_dir, "bridge-mcp"))
         self.assertEqual(self.command(link_dir, self.bin_dir), "bridge-mcp --prime")
 
-    def test_script_path_when_only_this_installs_own_bin_is_on_path(self):
+    def test_stable_link_when_only_this_installs_own_bin_is_on_path(self):
         # What `uv run` does: the venv bin is on the bridge's PATH but not the agent shell's.
-        self.assertEqual(self.command(self.bin_dir), f"{self.script} --prime")
+        self.assertEqual(self.command(self.bin_dir), f"{self.stable_link} --prime")
+        self.assertEqual(os.readlink(self.stable_link), self.script)
 
-    def test_script_path_when_a_different_install_is_on_path(self):
+    def test_stable_link_when_a_different_install_is_on_path(self):
         other = self.make_bin_dir("other-install")
-        self.assertEqual(self.command(other, self.bin_dir), f"{self.script} --prime")
+        self.assertEqual(self.command(other, self.bin_dir), f"{self.stable_link} --prime")
+
+    def test_stable_link_follows_a_rebuilt_install(self):
+        self.command(self.bin_dir)
+        rebuilt = self.make_bin_dir("venv-bin-rebuilt")
+        with self.mock.patch("claude_chatter.prime.sys.executable", os.path.join(rebuilt, "python3")), \
+                self.mock.patch.dict(os.environ, {"PATH": rebuilt}):
+            command = prime_command(stable_link=self.stable_link)
+        self.assertEqual(command, f"{self.stable_link} --prime")
+        self.assertEqual(os.readlink(self.stable_link), os.path.join(rebuilt, "bridge-mcp"))
+
+    def test_script_path_when_the_link_cannot_be_written(self):
+        blocked = os.path.join(self.tmp_dir.name, "blocked")
+        with open(blocked, "w", encoding="utf-8"):
+            pass
+        self.stable_link = os.path.join(blocked, "bridge-mcp")
+        self.assertEqual(self.command(self.bin_dir), f"{self.script} --prime")
 
     def test_module_form_when_no_console_script_exists(self):
         os.remove(self.script)

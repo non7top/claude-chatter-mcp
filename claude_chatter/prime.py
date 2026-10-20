@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("SocketBridgeMCP")
 
 PRIMED_DIR = os.path.join(os.path.expanduser("~"), ".claude", "chatter-primed")
+STABLE_LINK = os.path.join(os.path.expanduser("~"), ".claude", "chatter-bin", "bridge-mcp")
 _CONVERSATION_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 ENV_KEYS = ("ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN")
 # The token is handed to an agy child that connects to this address, so a
@@ -34,7 +35,18 @@ _LOOPBACK_ADDRESS = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\]):\d{1,5}$")
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 
-def prime_command() -> str:
+def _refresh_stable_link(script: str, link_path: str):
+    os.makedirs(os.path.dirname(link_path), exist_ok=True)
+    tmp_path = f"{link_path}.{os.getpid()}"
+    try:
+        os.remove(tmp_path)
+    except FileNotFoundError:
+        pass
+    os.symlink(script, tmp_path)
+    os.replace(tmp_path, link_path)
+
+
+def prime_command(stable_link: str = STABLE_LINK) -> str:
     """The shortest shell command that runs this install's own `--prime`."""
     bin_dir = os.path.dirname(sys.executable)
     script = os.path.join(bin_dir, "bridge-mcp")
@@ -49,7 +61,13 @@ def prime_command() -> str:
     on_path = shutil.which("bridge-mcp", path=os.pathsep.join(other_dirs))
     if on_path and os.path.realpath(on_path) == os.path.realpath(script):
         return "bridge-mcp --prime"
-    return f"{shlex.quote(script)} --prime"
+    # A uvx cache path changes on every rebuild, which defeats a permission
+    # allow-list entry for the command; this link keeps the command stable.
+    try:
+        _refresh_stable_link(script, stable_link)
+        return f"{shlex.quote(stable_link)} --prime"
+    except OSError:
+        return f"{shlex.quote(script)} --prime"
 
 
 def control_socket_path(bridge_socket_path: str) -> str:
