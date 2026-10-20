@@ -59,6 +59,55 @@ class _SessionCaptureMiddleware(Middleware):
         return await call_next(context)
 
 
+_ARGUMENT_ALIASES = {
+    "session": {"recipient", "to", "target", "peer"},
+    "message": {"content", "text", "body"},
+}
+
+
+class _LenientArgumentsMiddleware(Middleware):
+    """
+    Agents often call these tools with another host's parameter names
+    (Antigravity's native send_message takes Recipient/Message) or add
+    arguments like session_id, and FastMCP rejects the whole call. Maps case
+    and known alias spellings onto the real parameters and drops the rest;
+    required parameters are still validated afterwards.
+    """
+    def __init__(self):
+        self.server: Optional[FastMCP] = None
+
+    @staticmethod
+    def _norm(key: str) -> str:
+        return key.lower().replace("_", "").replace("-", "")
+
+    async def on_call_tool(self, context, call_next):
+        tool = await self.server.get_tool(context.message.name) if self.server else None
+        given = context.message.arguments
+        if tool is None or not given:
+            return await call_next(context)
+
+        known = {self._norm(name): name for name in tool.parameters.get("properties", {})}
+        cleaned: Dict[str, Any] = {}
+        dropped = []
+        for key, value in given.items():
+            target = known.get(self._norm(key))
+            if target is None:
+                target = next(
+                    (name for name in known.values()
+                     if self._norm(key) in _ARGUMENT_ALIASES.get(name, ())),
+                    None,
+                )
+            if target is None or target in cleaned:
+                dropped.append(key)
+            else:
+                cleaned[target] = value
+        if cleaned == given:
+            return await call_next(context)
+        if dropped:
+            logger.info(f"Dropped unexpected arguments {dropped} for tool {context.message.name}.")
+        return await call_next(context.copy(message=context.message.model_copy(update={"arguments": cleaned})))
+
+
 def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     """
     Builds a FastMCP server wired to the given protocol instance. A factory
@@ -125,13 +174,15 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
             protocol.cleanup_socket()
             logger.info("Bridge stdio handler shut down gracefully.")
 
+    lenient_arguments = _LenientArgumentsMiddleware()
     mcp = FastMCP(
         name="claudemessaging",
         version="0.3.0",
         instructions=INSTRUCTIONS,
         lifespan=_lifespan,
-        middleware=[_SessionCaptureMiddleware(last_session_holder)]
+        middleware=[_SessionCaptureMiddleware(last_session_holder), lenient_arguments]
     )
+    lenient_arguments.server = mcp
 
     @mcp.tool()
     async def list_sessions() -> str:
@@ -189,8 +240,8 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    async def enable_push(session_id: Optional[str] = None) -> str:
-        """Takes no meaningful input (session_id is accepted and ignored, since agents tend to pass it). Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
+    async def enable_push() -> str:
+        """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
         command = prime_command()
         result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
         if not poker.primed:

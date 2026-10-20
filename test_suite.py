@@ -850,9 +850,22 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
             result = await client.call_tool("enable_push", arguments or {})
         return json.loads(result.content[0].text)
 
-    async def test_enable_push_accepts_and_ignores_a_session_id(self):
+    async def test_enable_push_ignores_an_unexpected_session_id(self):
         result = await self.call_enable_push({"session_id": "2519eecb-f2c7-4996-bebe-69a58c2ea2f8"})
         self.assertIn("--prime", result["command"])
+
+    async def test_send_message_accepts_another_hosts_parameter_names(self):
+        from fastmcp import Client
+        from fastmcp.exceptions import ToolError
+        from claude_chatter import mcp_server
+
+        protocol = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "pp.sock"), session_name="pp-test"
+        )
+        async with Client(mcp_server.build_mcp_server(protocol)) as client:
+            with self.assertRaises(ToolError) as caught:
+                await client.call_tool("send_message", {"Recipient": "no-such-session", "Message": "hi"})
+        self.assertNotIn("validation error", str(caught.exception))
 
     async def test_enable_push_tells_the_agent_to_run_the_command(self):
         result = await self.call_enable_push()
