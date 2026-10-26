@@ -3,6 +3,7 @@
 Comprehensive Test Suite for Claude Message Bridge MCP Server (claude-mcp2)
 """
 import os
+import re
 import sys
 import json
 import time
@@ -87,32 +88,59 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
         finally:
             self.bridge.cleanup_session_descriptor()
 
-    async def test_rename_session_name_persists_across_new_instances(self):
-        """Verify persist_default_session_name causes a freshly-constructed
-        protocol instance (simulating a process restart, which happens often
-        - every MCP host reload) to pick up the renamed identity instead of
-        reverting to the cwd-hash default."""
+    def _name_file(self, project_path):
+        digest = hashlib.sha1(project_path.encode("utf-8")).hexdigest()[:8]
+        return os.path.expanduser(f"~/.claude/chatter-session-names/{digest}.name")
+
+    async def test_default_name_is_basename_plus_two_random_chars_and_persisted(self):
         workspace = tempfile.mkdtemp(prefix="persist_name_test_")
         old_cwd = os.getcwd()
         os.chdir(workspace)
         try:
             first = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p1.sock"))
-            self.assertEqual(first.session_name, f"bridge-{os.path.basename(workspace)}")
+            self.assertRegex(first.session_name, rf"^{re.escape(os.path.basename(workspace))}-[a-z0-9]{{2}}$")
+            with open(self._name_file(workspace), "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), first.session_name)
 
+            second = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p2.sock"))
+            self.assertEqual(second.session_name, first.session_name)
+        finally:
+            os.chdir(old_cwd)
+            if os.path.exists(self._name_file(workspace)):
+                os.remove(self._name_file(workspace))
+
+    async def test_rename_overwrites_the_persisted_name(self):
+        workspace = tempfile.mkdtemp(prefix="persist_name_test_")
+        old_cwd = os.getcwd()
+        os.chdir(workspace)
+        try:
+            first = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p1.sock"))
             first.persist_default_session_name("gwen")
-
             second = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "p2.sock"))
             self.assertEqual(second.session_name, "gwen")
         finally:
             os.chdir(old_cwd)
-            digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
-            name_file = os.path.expanduser(f"~/.claude/chatter-session-names/{digest}.name")
-            if os.path.exists(name_file):
-                os.remove(name_file)
+            if os.path.exists(self._name_file(workspace)):
+                os.remove(self._name_file(workspace))
 
-    async def test_default_name_gets_digest_suffix_when_basename_in_use(self):
-        """Two workspaces with the same basename must not share a default name
-        while the first one's session is alive."""
+    async def test_project_path_comes_from_the_agy_ancestor_not_the_cwd(self):
+        from unittest import mock
+
+        project = tempfile.mkdtemp(prefix="agy_project_")
+        fake_agy = mock.Mock()
+        fake_agy.name.return_value = "agy"
+        fake_agy.cwd.return_value = project
+        try:
+            with mock.patch("claude_chatter.protocol.psutil.Process") as process:
+                process.return_value.parents.return_value = [fake_agy]
+                protocol = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "a.sock"))
+            self.assertRegex(protocol.session_name, rf"^{re.escape(os.path.basename(project))}-[a-z0-9]{{2}}$")
+            self.assertTrue(os.path.exists(self._name_file(project)))
+        finally:
+            if os.path.exists(self._name_file(project)):
+                os.remove(self._name_file(project))
+
+    async def test_stored_name_in_use_by_a_live_session_gets_a_fresh_unpersisted_suffix(self):
         workspace = tempfile.mkdtemp(prefix="name_clash_test_")
         old_cwd = os.getcwd()
         os.chdir(workspace)
@@ -121,18 +149,21 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
         other = subprocess.Popen(["sleep", "30"])
         other_json = os.path.join(sessions_dir, f"{other.pid}.clash-test.json")
         try:
-            base = f"bridge-{os.path.basename(workspace)}"
+            first = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "c1.sock"))
+            stored = first.session_name
             with open(other_json, "w", encoding="utf-8") as f:
-                json.dump({"pid": other.pid, "name": base}, f)
-            clashing = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "c.sock"))
-            digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
-            self.assertEqual(clashing.session_name, f"{base}-{digest}")
+                json.dump({"pid": other.pid, "name": stored}, f)
+            clashing = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "c2.sock"))
+            self.assertNotEqual(clashing.session_name, stored)
+            with open(self._name_file(workspace), "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), stored)
         finally:
             other.kill()
             other.wait()
             os.chdir(old_cwd)
-            if os.path.exists(other_json):
-                os.remove(other_json)
+            for path in (other_json, self._name_file(workspace)):
+                if os.path.exists(path):
+                    os.remove(path)
 
     async def test_dead_session_purging(self):
         """Verify purging of dead session descriptors and key files."""

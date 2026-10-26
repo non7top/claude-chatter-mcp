@@ -15,7 +15,9 @@ import glob
 import uuid
 import stat
 import time
+import string
 import hashlib
+import secrets
 import asyncio
 import logging
 import psutil
@@ -57,8 +59,19 @@ class ClaudeMessagingProtocol:
         self.response_store: Dict[str, Dict[str, Any]] = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
+    def _project_path(self) -> str:
+        # A plugin-launched server runs in the plugin's install directory, so
+        # the agy process above it is the only place the project path lives.
+        try:
+            agy = next((p for p in psutil.Process().parents() if p.name() == "agy"), None)
+            if agy is not None:
+                return agy.cwd()
+        except psutil.Error:
+            pass
+        return os.getcwd()
+
     def _cwd_digest(self) -> str:
-        return hashlib.sha1(os.getcwd().encode("utf-8")).hexdigest()[:8]
+        return hashlib.sha1(self._project_path().encode("utf-8")).hexdigest()[:8]
 
     def _persisted_name_path(self, cwd_digest: str) -> str:
         d = os.path.join(self.home_dir, ".claude", "chatter-session-names")
@@ -67,32 +80,33 @@ class ClaudeMessagingProtocol:
 
     def _derive_default_session_name(self) -> str:
         """
-        Derives a stable, per-workspace default session name from cwd,
-        "bridge-<cwd basename>", so the name says which workspace it is. The
-        host (e.g. Antigravity) doesn't pass a session name, so cwd is the only
-        tangible identity available. If another live session already uses
-        that name (two workspaces with the same basename), the cwd digest is
-        appended so they never collide on the same socket.
+        Returns the session name persisted for this project path (one small
+        file per path digest, so unrelated projects never contend on a file).
+        With nothing stored, generates "<basename>-<2 random
+        alphanumerics>" and persists it, so the name survives the restarts that
+        happen on every MCP host reload. rename_session overwrites the stored
+        value.
 
-        If rename_session was ever called for this workspace, its persisted
-        name (one small file per cwd digest, so unrelated workspaces never
-        contend on the same file) wins over the derived default - a rename
-        is otherwise only in-memory and reverts on the next process restart,
-        which happens often (every MCP host reload).
+        If another live session already holds the stored name (two sessions
+        in one project), this process gets a fresh random suffix that is not
+        persisted, so the two never share a socket.
         """
-        cwd_digest = self._cwd_digest()
         try:
-            with open(self._persisted_name_path(cwd_digest), "r", encoding="utf-8") as f:
+            with open(self._persisted_name_path(self._cwd_digest()), "r", encoding="utf-8") as f:
                 persisted = f.read().strip()
-                if persisted:
-                    return persisted
         except OSError:
-            pass
-        basename = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(os.getcwd())) or "root"
-        name = f"bridge-{basename}"
-        if self._session_name_in_use(name):
-            name = f"{name}-{cwd_digest}"
-        return name
+            persisted = ""
+        if not persisted:
+            persisted = self._random_session_name()
+            self.persist_default_session_name(persisted)
+        if self._session_name_in_use(persisted):
+            return self._random_session_name()
+        return persisted
+
+    def _random_session_name(self) -> str:
+        basename = re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(self._project_path())) or "root"
+        suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(2))
+        return f"{basename}-{suffix}"
 
     def _session_name_in_use(self, name: str) -> bool:
         for path in glob.glob(os.path.join(self.sessions_dir, "*.json")):
