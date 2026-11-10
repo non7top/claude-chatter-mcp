@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "claude-chatter",
+  "description": "Message Claude Code sessions from Antigravity, and get woken when they reply."
+}

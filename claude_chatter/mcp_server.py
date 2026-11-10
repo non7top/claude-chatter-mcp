@@ -8,6 +8,7 @@ import json
 import signal
 import asyncio
 import logging
+import psutil
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -16,19 +17,22 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
 from .protocol import ClaudeMessagingProtocol
+from .prime import AgyPoker, control_socket_path, prime_command
 
 logger = logging.getLogger("SocketBridgeMCP")
 
 INSTRUCTIONS = (
     "Bi-Directional AI Communication MCP Bridge for Claude Code sessions. "
-    "Nothing can interrupt you when a message arrives, so you must poll: "
-    "call read_messages at every opportunity - at the start of every turn, "
-    "before starting any piece of work, after finishing each piece of work, "
-    "between tool calls in long tasks, and before going idle or ending your "
-    "turn. Always call it again after a tools/list_changed notification; "
-    "that notification only signals that something arrived, the message "
-    "itself is never inline. An empty result is cheap, so over-checking is "
-    "better than missing a message."
+    "Nothing can interrupt you when a message arrives, so check read_messages "
+    "at the start of every turn, before and after each piece of work, and "
+    "before going idle or ending your turn. Do not poll in a loop to wait for "
+    "a reply: after sending, end your turn. A primed Antigravity session is "
+    "woken by the reply itself, and an idle Claude Code session may not reply "
+    "until someone prompts it. Always call read_messages after a "
+    "tools/list_changed notification; it only signals that something "
+    "arrived, never carries the message. If you run inside Antigravity, "
+    "call enable_push first thing in every conversation and run the shell "
+    "command it returns; until you do, nothing can wake you."
 )
 
 
@@ -53,6 +57,55 @@ class _SessionCaptureMiddleware(Middleware):
             except Exception:
                 pass
         return await call_next(context)
+
+
+_ARGUMENT_ALIASES = {
+    "session": {"recipient", "to", "target", "peer"},
+    "message": {"content", "text", "body"},
+}
+
+
+class _LenientArgumentsMiddleware(Middleware):
+    """
+    Agents often call these tools with another host's parameter names
+    (Antigravity's native send_message takes Recipient/Message) or add
+    arguments like session_id, and FastMCP rejects the whole call. Maps case
+    and known alias spellings onto the real parameters and drops the rest;
+    required parameters are still validated afterwards.
+    """
+    def __init__(self):
+        self.server: Optional[FastMCP] = None
+
+    @staticmethod
+    def _norm(key: str) -> str:
+        return key.lower().replace("_", "").replace("-", "")
+
+    async def on_call_tool(self, context, call_next):
+        tool = await self.server.get_tool(context.message.name) if self.server else None
+        given = context.message.arguments
+        if tool is None or not given:
+            return await call_next(context)
+
+        known = {self._norm(name): name for name in tool.parameters.get("properties", {})}
+        cleaned: Dict[str, Any] = {}
+        dropped = []
+        for key, value in given.items():
+            target = known.get(self._norm(key))
+            if target is None:
+                target = next(
+                    (name for name in known.values()
+                     if self._norm(key) in _ARGUMENT_ALIASES.get(name, ())),
+                    None,
+                )
+            if target is None or target in cleaned:
+                dropped.append(key)
+            else:
+                cleaned[target] = value
+        if cleaned == given:
+            return await call_next(context)
+        if dropped:
+            logger.info(f"Dropped unexpected arguments {dropped} for tool {context.message.name}.")
+        return await call_next(context.copy(message=context.message.model_copy(update={"arguments": cleaned})))
 
 
 def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
@@ -88,31 +141,48 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         except Exception as e:
             logger.error(f"Failed to send tool_list_changed notification: {e}")
 
-    protocol.on_inbound_message = notify_mcp_host
+    poker = AgyPoker()
+    try:
+        under_agy = any(p.name() == "agy" for p in psutil.Process().parents())
+    except psutil.Error:
+        under_agy = False
+
+    def on_inbound(method: str, params: Dict[str, Any]):
+        notify_mcp_host(method, params)
+        poker.notify(params.get("sender", "unknown"))
+
+    protocol.on_inbound_message = on_inbound
+    control_path = control_socket_path(protocol.bridge_socket_path)
 
     @asynccontextmanager
     async def _lifespan(server: FastMCP):
         protocol.register_session_descriptor(session_name=protocol.session_name, kind="bg")
         listener_task = asyncio.create_task(protocol.start_bridge_listener())
+        control_task = asyncio.create_task(poker.serve_control_socket(control_path))
         try:
             yield
         finally:
-            listener_task.cancel()
-            try:
-                await listener_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            for task in (listener_task, control_task):
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if os.path.exists(control_path):
+                os.remove(control_path)
             protocol.cleanup_session_descriptor()
             protocol.cleanup_socket()
             logger.info("Bridge stdio handler shut down gracefully.")
 
+    lenient_arguments = _LenientArgumentsMiddleware()
     mcp = FastMCP(
         name="claudemessaging",
         version="0.3.0",
         instructions=INSTRUCTIONS,
         lifespan=_lifespan,
-        middleware=[_SessionCaptureMiddleware(last_session_holder)]
+        middleware=[_SessionCaptureMiddleware(last_session_holder), lenient_arguments]
     )
+    lenient_arguments.server = mcp
 
     @mcp.tool()
     async def list_sessions() -> str:
@@ -160,9 +230,27 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 
     @mcp.tool()
     async def read_messages(mark_read: bool = True) -> str:
-        """Returns unread inbound messages (oldest first) - the inbox check for this async mailbox. Nothing can reliably interrupt you when a message arrives, so call this after a tools/list_changed notification, or periodically, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming)."""
-        unread = protocol.get_unread_messages(mark_read=mark_read)
-        return json.dumps(unread, indent=2)
+        """Returns {"messages": {...}} with unread inbound messages (oldest first) - the inbox check for this async mailbox. Nothing can reliably interrupt you when a message arrives, so call this after a tools/list_changed notification, or at the start of a turn and before going idle, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming). Adds a push_hint when this Antigravity session has not primed push yet."""
+        result: Dict[str, Any] = {"messages": protocol.get_unread_messages(mark_read=mark_read)}
+        if under_agy and not poker.primed:
+            result["push_hint"] = (
+                "Push is not primed, so nothing can wake you when a message arrives. "
+                "Call enable_push once and run the shell command it returns."
+            )
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    async def enable_push() -> str:
+        """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
+        command = prime_command()
+        result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
+        if not poker.primed:
+            result["next_step"] = (
+                "Run `command` in your shell tool now, exactly as given. Nothing is primed until you do. "
+                "It prints JSON with ok=true on success and never prints the token; do not write the "
+                "token anywhere. Then end your turn instead of polling."
+            )
+        return json.dumps(result, indent=2)
 
     @mcp.tool()
     async def get_responses(msg_id: Optional[str] = None) -> str:
@@ -202,6 +290,10 @@ async def run_mcp_server(protocol: ClaudeMessagingProtocol):
         logger.info(f"Received signal {signum}; cleaning up and exiting.")
         protocol.cleanup_session_descriptor()
         protocol.cleanup_socket()
+        try:
+            os.remove(control_socket_path(protocol.bridge_socket_path))
+        except OSError:
+            pass
         os._exit(0)
 
     for sig in (signal.SIGTERM, signal.SIGINT):

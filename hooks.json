@@ -1,0 +1,11 @@
+{
+  "claude-chatter-prime": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "uvx --from git+https://github.com/non7top/claude-chatter-mcp bridge-mcp --prime-hook",
+        "timeout": 30
+      }
+    ]
+  }
+}
