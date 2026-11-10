@@ -118,7 +118,14 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     async def list_sessions() -> str:
         """Scans workspace configurations, purges dead session files, and returns active Claude sessions."""
         peers = await protocol.verify_and_purge_sessions()
-        return json.dumps(peers, indent=2)
+        return json.dumps(protocol.redact_peers(peers), indent=2)
+
+    @mcp.tool()
+    async def list_jobs() -> str:
+        """Lists Claude Code background jobs from ~/.claude/jobs (state, detail, needs, PR links, worktree, last activity), including finished ones with no live process."""
+        from .jobs import list_jobs as _list_jobs
+        peers = await protocol.verify_and_purge_sessions()
+        return json.dumps(_list_jobs(live_sessions=peers), indent=2)
 
     @mcp.tool()
     async def purge_sessions() -> str:

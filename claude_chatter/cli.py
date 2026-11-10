@@ -47,6 +47,7 @@ def main():
     mode_group = parser.add_argument_group("Execution Modes")
     mode_group.add_argument("--standalone", "--daemon", action="store_true", help="Run as standalone daemon server without stdio MCP loop")
     mode_group.add_argument("--list", action="store_true", help="List all active Claude Code sessions")
+    mode_group.add_argument("--jobs", action="store_true", help="List Claude Code background jobs (including finished ones) from ~/.claude/jobs")
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
@@ -57,8 +58,18 @@ def main():
 
         async def _cmd_list():
             peers = await protocol.verify_and_purge_sessions()
-            print(json.dumps(peers, indent=2))
+            print(json.dumps(protocol.redact_peers(peers), indent=2))
         asyncio.run(_cmd_list())
+        sys.exit(0)
+
+    elif args.jobs:
+        from .jobs import list_jobs
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+
+        async def _cmd_jobs():
+            peers = await protocol.verify_and_purge_sessions()
+            print(json.dumps(list_jobs(live_sessions=peers), indent=2))
+        asyncio.run(_cmd_jobs())
         sys.exit(0)
 
     elif args.purge:
