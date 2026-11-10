@@ -1,6 +1,6 @@
 # claude-chatter-mcp bridge
 
-`claude-chatter-mcp` bridges MCP-compatible agents to Claude's `SendMessage`/`ListAgents` implementation, allowing bidirectional communication - built for **Google Antigravity** and **Claude Code**, non-blocking and authenticated.
+`claude-chatter-mcp` lets MCP-compatible agents (built for **Google Antigravity**) exchange messages with Claude Code sessions. It speaks Claude Code's peer-messaging protocol (`SendMessage`/`ListAgents`): the bridge announces itself as a session and talks to other sessions over their Unix sockets. Non-blocking and authenticated.
 
 It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemon/CLI, and as an **Antigravity CLI (`agy`) plugin** that bundles the MCP server, a `PreInvocation` hook that primes push, a rules file and the `chatter` skill (see [Option 4](#option-4-antigravity-plugin-mcp-server--push-priming)).
 
