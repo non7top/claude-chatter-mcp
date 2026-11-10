@@ -148,7 +148,7 @@ Dispatches an authenticated user message frame to a target Claude Code session. 
   * `message` (string, required): Text message content to deliver.
 
 ### 4. `read_messages`
-Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound messages are buffered in memory; nothing interrupts the host when one arrives, so call this periodically or after a `tools/list_changed` notification.
+Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound messages are buffered in memory; push can wake a primed Antigravity session when one arrives, but it is best effort, so also call this periodically or after a `tools/list_changed` notification.
 * **Arguments**:
   * `mark_read` (boolean, optional, default true): set false to peek without consuming.
 

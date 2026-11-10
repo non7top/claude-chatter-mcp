@@ -595,8 +595,8 @@ class ClaudeMessagingProtocol:
     def get_unread_messages(self, mark_read: bool = True) -> Dict[str, Dict[str, Any]]:
         """
         Returns currently-unread inbound messages (oldest first), the actual
-        "check my inbox" affordance for the async-mailbox model: since nothing
-        can reliably push/interrupt the connected host, whoever is checking
+        "check my inbox" affordance for the async-mailbox model: since pushing to the
+        connected host is best effort, whoever is checking
         needs a way to see only what's new since they last looked, rather than
         re-seeing the same history or having to track msg_ids themselves.
         Marks the returned messages as read unless mark_read is False (to
