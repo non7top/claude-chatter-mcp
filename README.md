@@ -2,12 +2,15 @@
 
 `claude-chatter-mcp` bridges MCP-compatible agents to Claude's `SendMessage`/`ListAgents` implementation, allowing bidirectional communication - built for **Google Antigravity** and **Claude Code**, non-blocking and authenticated.
 
+It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemon/CLI, and as an **Antigravity CLI (`agy`) plugin** that bundles the MCP server, a `PreInvocation` hook that primes push, a rules file and the `chatter` skill (see [Option 4](#option-4-antigravity-plugin-mcp-server--push-priming)).
+
 ## 🚀 Key Features
 
 * **Session Discovery & Automatic Purging**: Scans local workspace configurations (`~/.claude/sessions/*.json`), verifies process lifecycles via PID tracking (`psutil`), and automatically purges orphaned session descriptors and stale `.key` credential files.
 * **Authenticated Unix Socket IPC**: Authenticates outbound message frames directly into active target session sockets (`/run/user/<uid>/cc-socks/*.sock`) using the `peerToken` read from each session's `.key` file.
 * **Fire-and-Forget Message Dispatch**: `send_message`/`--send` dispatches and returns immediately; a real reply, if the target sends one, arrives later as its own inbound message rather than being synchronously extracted from a transcript file.
 * **Dedicated Inbound Unix Socket Listener**: Listens on a per-session socket (default `/run/user/<uid>/cc-socks/bridge-<name>.sock`, falling back to `/tmp/cc-socks/`; override with `--socket` or `CHATTER_BRIDGE_SOCKET`; single-user `0600` permissions) for real-time peer confirmations and inbound message buffering.
+* **Push to Antigravity**: `enable_push` / `bridge-mcp --prime` lets an inbound message wake an idle `agy` conversation through `agy agentapi send-message`, so the agent does not have to poll `read_messages` (see [Waking an idle Antigravity session](#-waking-an-idle-antigravity-session-push)).
 * **Background Job Listing**: `list_jobs` / `--jobs` reads `~/.claude/jobs` to report every background job, including finished ones that have no live process, with state, result text, PR states, worktree, running status and transcript path.
 * **Graceful Lifecycle & Signal Handling**: Catches `SIGTERM` and `SIGINT` signals to cleanly unbind sockets and exit with status code `0`, avoiding process termination errors during MCP server reloads.
 
@@ -210,7 +213,7 @@ Execute single-shot operations directly from terminal:
 Run the included unit and integration test suites in a disposable non-root container:
 
 ```bash
-DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose run --rm test
+make test
 ```
 
 ---
