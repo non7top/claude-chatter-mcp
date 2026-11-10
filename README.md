@@ -208,6 +208,32 @@ Execute single-shot operations directly from terminal:
 
 ---
 
+## 🔧 Operations, Security and Limits
+
+**Files the bridge reads or writes** (all under `~/.claude/`):
+* `sessions/` - Claude Code's session descriptors and `.key` files; the bridge reads them and writes its own descriptor and key.
+* `logs/claude-chatter.log` - shared by all bridge processes (also written to stderr); rotates at 5 MiB, 3 backups.
+* `chatter-session-names/` - the generated or renamed session name per project path.
+* `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).
+* `chatter-bin/bridge-mcp` - a stable symlink to this install, so the prime command can be allow-listed.
+
+**Settings:** `--name` or `CHATTER_SESSION_NAME` (alias `AGY_SESSION_NAME`) sets the session name; `--socket` or `CHATTER_BRIDGE_SOCKET` (alias `AGY_MCP_BRIDGE_SOCKET`) sets the bridge socket.
+
+**Security model:**
+* Peer tokens are read from each session's `.key` file and only used to authenticate outbound frames. `list_sessions` and `--list` do not print them.
+* The bridge's own key file and its sockets are created with `0600` permissions.
+* The Antigravity token used for push is held in memory only, passed to `agy` through its environment (never argv, logs or disk), and only accepted together with a loopback address.
+* Push injects a fixed notice, never text written by the sender.
+
+**Limits:**
+* The bridge works on the real `~/.claude`, which is why it runs host-native and only the tests run in a container with an isolated home.
+* Developed on Linux: the default socket directory is `/run/user/<uid>/cc-socks` (fallback `/tmp/cc-socks`), and process start time and PID namespace come from `/proc` and `/etc/machine-id`, with placeholder values when those are unreadable.
+* `list_jobs` reads Claude Code's own job, roster and PR-cache files. Their layout is not a documented interface and may change; unparseable files are skipped.
+* Replies are asynchronous, and an idle Claude Code session may not answer until someone prompts it.
+* Push is best effort; keep calling `read_messages`. See [docs/agy-notes.md](docs/agy-notes.md) for the Antigravity details.
+
+---
+
 ## ⚙️ Running Tests
 
 Run the included unit and integration test suites in a disposable non-root container:
