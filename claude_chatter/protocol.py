@@ -207,7 +207,9 @@ class ClaudeMessagingProtocol:
                         "cwd": cwd,
                         "kind": meta.get("kind", "interactive"),
                         "updatedAt": meta.get("updatedAt"),
-                        "status": meta.get("status", "active")
+                        "status": meta.get("status", "active"),
+                        "jobId": meta.get("jobId"),
+                        "parkedJobId": meta.get("parkedJobId"),
                     }
                 else:
                     # Target process is dead; purge stale descriptor and key files safely
@@ -233,6 +235,11 @@ class ClaudeMessagingProtocol:
         self.active_peers = current_sessions
         logger.info(f"Session analysis complete. Active peers: {len(current_sessions)}, Purged: {purged_count}")
         return self.active_peers
+
+    @staticmethod
+    def redact_peers(peers: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Copy of `peers` without auth tokens, safe to hand to an agent or print."""
+        return {n: {k: v for k, v in p.items() if k != "token"} for n, p in peers.items()}
 
     def _resolve_session(self, session_identifier: str) -> Optional[Dict[str, Any]]:
         if not self.active_peers:

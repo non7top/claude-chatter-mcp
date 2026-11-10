@@ -603,5 +603,81 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                     pass
 
 
+class TestListJobs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        job_dir = os.path.join(self.tmp.name, "jobs", "abc12345")
+        os.makedirs(job_dir)
+        transcript = os.path.join(self.tmp.name, "t.jsonl")
+        open(transcript, "w").close()
+        with open(os.path.join(job_dir, "state.json"), "w") as f:
+            json.dump({
+                "state": "done", "detail": "PR #1 open", "output": {"result": "final summary"}, "name": "demo", "daemonShort": "abc12345",
+                "updatedAt": "2026-11-02T10:00:00Z", "cwd": "/x",
+                "children": [{"id": "1", "kind": "pr", "href": "https://example.test/pr/1"}],
+                "respawnFlags": ["--secret"], "providerEnv": {"K": "V"}, "linkScanPath": transcript,
+            }, f)
+        with open(os.path.join(job_dir, "timeline.jsonl"), "w") as f:
+            f.write(json.dumps({"at": "t1", "state": "working", "detail": "a", "text": "long"}) + "\n")
+            f.write(json.dumps({"at": "t2", "state": "done", "detail": "b", "text": "long"}) + "\n")
+            f.write("not json\n")
+        with open(os.path.join(self.tmp.name, "jobs", "bad.json"), "w") as f:
+            f.write("{")
+        os.makedirs(os.path.join(self.tmp.name, "jobs", "broken"))
+        with open(os.path.join(self.tmp.name, "jobs", "broken", "state.json"), "w") as f:
+            f.write("{")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_lists_finished_job_without_sensitive_fields(self):
+        from claude_chatter.jobs import list_jobs
+        jobs = list_jobs(claude_dir=self.tmp.name)
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual(job["id"], "abc12345")
+        self.assertEqual(job["state"], "done")
+        self.assertEqual(job["output"], {"result": "final summary"})
+        self.assertEqual(job["children"][0]["href"], "https://example.test/pr/1")
+        self.assertEqual(job["last_timeline"], {"at": "t2", "state": "done", "detail": "b"})
+        self.assertTrue(job["transcript_path"].endswith("t.jsonl"))
+        self.assertIsNotNone(job["transcript_mtime"])
+        self.assertIsNone(job["live"])
+        for hidden in ("respawnFlags", "providerEnv", "linkScanPath"):
+            self.assertNotIn(hidden, job)
+
+    def test_joins_live_session_by_job_id(self):
+        from claude_chatter.jobs import list_jobs
+        live = {"s": {"pid": 5, "kind": "bg", "status": "idle", "parkedJobId": "abc12345", "token": "t"}}
+        job = list_jobs(claude_dir=self.tmp.name, live_sessions=live)[0]
+        self.assertEqual(job["live"], {"pid": 5, "kind": "bg", "status": "idle"})
+
+    def test_running_requires_live_worker_with_matching_start_time(self):
+        from claude_chatter.jobs import list_jobs
+        with open("/proc/%d/stat" % os.getpid()) as f:
+            start = f.read().rsplit(")", 1)[1].split()[19]
+        os.makedirs(os.path.join(self.tmp.name, "daemon"))
+        roster = os.path.join(self.tmp.name, "daemon", "roster.json")
+        with open(roster, "w") as f:
+            json.dump({"workers": {"abc12345": {"pid": os.getpid(), "procStart": start}}}, f)
+        self.assertTrue(list_jobs(claude_dir=self.tmp.name)[0]["running"])
+        with open(roster, "w") as f:
+            json.dump({"workers": {"abc12345": {"pid": os.getpid(), "procStart": "1"}}}, f)
+        self.assertFalse(list_jobs(claude_dir=self.tmp.name)[0]["running"])
+        os.remove(roster)
+        self.assertFalse(list_jobs(claude_dir=self.tmp.name)[0]["running"])
+
+    def test_pr_state_comes_from_cache(self):
+        from claude_chatter.jobs import list_jobs
+        with open(os.path.join(self.tmp.name, "gh-pr-status-cache.json"), "w") as f:
+            json.dump({"https://example.test/pr/1": {"state": "MERGED", "title": "t"}}, f)
+        self.assertEqual(list_jobs(claude_dir=self.tmp.name)[0]["children"][0]["pr_state"], "MERGED")
+
+    def test_redact_peers_drops_token_only(self):
+        peers = {"a": {"name": "a", "token": "secret", "pid": 1}}
+        self.assertEqual(ClaudeMessagingProtocol.redact_peers(peers), {"a": {"name": "a", "pid": 1}})
+        self.assertIn("token", peers["a"])
+
+
 if __name__ == "__main__":
     unittest.main()

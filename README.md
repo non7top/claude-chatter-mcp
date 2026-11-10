@@ -5,9 +5,10 @@
 ## 🚀 Key Features
 
 * **Session Discovery & Automatic Purging**: Scans local workspace configurations (`~/.claude/sessions/*.json`), verifies process lifecycles via PID tracking (`psutil`), and automatically purges orphaned session descriptors and stale `.key` credential files.
-* **Authenticated Unix Socket IPC**: Authenticates outbound message frames directly into active target session sockets (`/run/user/<uid>/cc-socks/*.sock`) using exfiltrated `peerToken` credentials.
+* **Authenticated Unix Socket IPC**: Authenticates outbound message frames directly into active target session sockets (`/run/user/<uid>/cc-socks/*.sock`) using the `peerToken` read from each session's `.key` file.
 * **Fire-and-Forget Message Dispatch**: `send_message`/`--send` dispatches and returns immediately; a real reply, if the target sends one, arrives later as its own inbound message rather than being synchronously extracted from a transcript file.
-* **Dedicated Inbound Unix Socket Listener**: Listens on `/tmp/agy_mcp_bridge.sock` (with secure single-user `0600` permissions) for real-time peer confirmations and inbound message buffering.
+* **Dedicated Inbound Unix Socket Listener**: Listens on a per-session socket (default `/run/user/<uid>/cc-socks/bridge-<name>.sock`, falling back to `/tmp/cc-socks/`; override with `--socket` or `CHATTER_BRIDGE_SOCKET`; single-user `0600` permissions) for real-time peer confirmations and inbound message buffering.
+* **Background Job Listing**: `list_jobs` / `--jobs` reads `~/.claude/jobs` to report every background job, including finished ones that have no live process, with state, result text, PR states, worktree, running status and transcript path.
 * **Graceful Lifecycle & Signal Handling**: Catches `SIGTERM` and `SIGINT` signals to cleanly unbind sockets and exit with status code `0`, avoiding process termination errors during MCP server reloads.
 
 ---
@@ -101,28 +102,37 @@ agy mcp add claudemessaging bridge-mcp
 
 ## 🧰 MCP Tool Reference
 
-The MCP server exposes four primary tools:
+The MCP server exposes these tools:
 
 ### 1. `list_sessions`
-Scans Claude Code workspace configurations, cleans up orphaned/dead session files, and returns all active Claude sessions.
+Scans Claude Code workspace configurations, cleans up orphaned/dead session files, and returns all active Claude sessions (name, pid, session ID, socket, cwd, kind, status). Auth tokens are not included in the output.
 * **Arguments**: None
 
-### 2. `send_message`
+### 2. `list_jobs`
+Reads `~/.claude/jobs/*/state.json` and returns one entry per background job, finished ones included: `state`, `detail`, `output` (the final result text the fleet list shows), `needs`, PR `children`, `cwd`, worktree path/branch, last timeline entry, transcript path and mtime (the path only; the file is never read), `running` (the daemon roster has a live worker for the job), `live` (pid/kind/status when a session process is attached via `jobId`), and `pr_state` per PR link from Claude Code's `gh-pr-status-cache.json`. Read-only; also `bridge-mcp --jobs`.
+* **Arguments**: None
+
+### 3. `send_message`
 Dispatches an authenticated user message frame to a target Claude Code session. Fire-and-forget: returns as soon as the message is delivered. Any real reply the target sends back arrives later as its own inbound message, observable via `get_responses`.
 * **Arguments**:
   * `session` (string, required): Target session name (e.g. `rgle`), PID, or Session ID.
   * `message` (string, required): Text message content to deliver.
 
-### 3. `get_responses`
-Queries historical inbound and outbound message response records cached in memory.
+### 4. `read_messages`
+Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound messages are buffered in memory; nothing interrupts the host when one arrives, so call this periodically or after a `tools/list_changed` notification.
+* **Arguments**:
+  * `mark_read` (boolean, optional, default true): set false to peek without consuming.
+
+### 5. `get_responses`
+Queries the full inbound and outbound message history cached in memory, regardless of read state.
 * **Arguments**:
   * `msg_id` (string, optional): Specific message ID filter.
 
-### 4. `purge_sessions`
+### 6. `purge_sessions`
 Manually triggers proactive scanning and deletion of dead socket descriptors and key files.
 * **Arguments**: None
 
-### 5. `rename_session`
+### 7. `rename_session`
 Renames this bridge's announced session descriptor in `~/.claude/sessions/` so surrounding Claude Code processes discover it under the new name via `ListAgents`.
 * **Arguments**:
   * `new_name` (string, required): The new session name to announce (e.g. `bridge-dev`). Without a rename, the name defaults to `bridge-<cwd basename>`; override it with `--name` or `CHATTER_SESSION_NAME`.
@@ -154,6 +164,10 @@ Execute single-shot operations directly from terminal:
   ```bash
   bridge-mcp --purge
   ```
+* **List Background Jobs** (finished ones included; read-only apart from the session scan that precedes it):
+  ```bash
+  bridge-mcp --jobs
+  ```
 * **Send Message to Session** (fire-and-forget; any reply arrives later as its own inbound message):
   ```bash
   bridge-mcp --send rgle "Hello from CLI"
@@ -163,10 +177,10 @@ Execute single-shot operations directly from terminal:
 
 ## ⚙️ Running Tests
 
-Run the included unit and integration test suites:
+Run the included unit and integration test suites in a disposable non-root container:
 
 ```bash
-python3 test_suite.py
+DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose run --rm test
 ```
 
 ---
