@@ -9,6 +9,7 @@ reusable core that both the MCP entry point (mcp_server.py) and the
 standalone daemon entry point (standalone.py) build on top of.
 """
 import os
+import sys
 import re
 import json
 import glob
@@ -67,7 +68,7 @@ class ClaudeMessagingProtocol:
 
         if enable_storage:
             self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
-            self.store = MessageStore(self.db_path)
+            self.store = MessageStore(self.db_path, read_only=self.read_only)
             if not self.read_only:
                 self.store.prune()
             if session_id:
@@ -149,6 +150,42 @@ class ClaudeMessagingProtocol:
 
         path = project_path or cls._find_project_path()
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        live_candidates = set()
+        if os.path.exists(sessions_dir):
+            for desc_file in glob.glob(os.path.join(sessions_dir, "bridge-*.json")):
+                try:
+                    with open(desc_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    raw_pid = data.get("pid")
+                    try:
+                        pid = int(raw_pid)
+                    except (TypeError, ValueError):
+                        pid = None
+                    if not cls._static_is_pid_alive(pid):
+                        continue
+                    file_digest = data.get("cwdDigest")
+                    if not file_digest:
+                        file_cwd = data.get("projectPath") or data.get("cwd")
+                        if file_cwd:
+                            file_digest = hashlib.sha1(file_cwd.encode("utf-8")).hexdigest()[:8]
+                    if file_digest == digest:
+                        sname = data.get("name")
+                        if sname:
+                            live_candidates.add(sname)
+                except Exception:
+                    pass
+
+        if len(live_candidates) == 1:
+            return next(iter(live_candidates))
+        elif len(live_candidates) > 1:
+            candidates_str = ", ".join(sorted(live_candidates))
+            sys.stderr.write(
+                f"Multiple live bridge sessions found for this workspace ({candidates_str}). "
+                f"Please specify --name to disambiguate.\n"
+            )
+            return ""
 
         db = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
         if os.path.exists(db):

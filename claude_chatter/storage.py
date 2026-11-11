@@ -55,7 +55,7 @@ SCHEMA = "\n".join(s + ";" for s in SCHEMA_STATEMENTS)
 
 
 class MessageStore:
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, read_only: bool = False):
         if db_path:
             self.db_path = os.path.abspath(os.path.expanduser(db_path))
         else:
@@ -65,11 +65,13 @@ class MessageStore:
             else:
                 self.db_path = os.path.expanduser("~/.claude/chatter-messages.db")
 
+        self.read_only = read_only
         self._conn: Optional[sqlite3.Connection] = None
         self._disabled = False
         self.last_error: Optional[str] = None
         self._last_prune_time: float = 0.0
-        self._init_db()
+        if not self.read_only:
+            self._init_db()
 
     def is_disabled(self) -> bool:
         return self._disabled
@@ -202,12 +204,23 @@ class MessageStore:
 
     def _get_connection(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            with self._conn:
-                self._conn.execute("PRAGMA journal_mode=WAL;")
-                self._conn.execute("PRAGMA busy_timeout=5000;")
-                self._conn.execute("PRAGMA synchronous=NORMAL;")
+            if self.read_only:
+                try:
+                    uri = f"file:{os.path.abspath(self.db_path)}?mode=ro"
+                    self._conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+                    self._conn.row_factory = sqlite3.Row
+                except Exception as e:
+                    logger.error(f"Failed to open SQLite store in read-only mode at {self.db_path}: {e}")
+                    self._disabled = True
+                    self.last_error = str(e)
+                    raise
+            else:
+                self._conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+                self._conn.row_factory = sqlite3.Row
+                with self._conn:
+                    self._conn.execute("PRAGMA journal_mode=WAL;")
+                    self._conn.execute("PRAGMA busy_timeout=5000;")
+                    self._conn.execute("PRAGMA synchronous=NORMAL;")
         return self._conn
 
     def ensure_session(
@@ -216,7 +229,7 @@ class MessageStore:
         cwd_digest: str = "",
         session_id: Optional[str] = None
     ) -> str:
-        if self._disabled:
+        if self._disabled or self.read_only:
             return session_id or session_name
         now = time.time()
         try:
@@ -328,7 +341,7 @@ class MessageStore:
         cwd_digest: str = "",
         session_id: Optional[str] = None
     ):
-        if self._disabled:
+        if self._disabled or self.read_only:
             return
         now = time.time()
         if now - self._last_prune_time >= 3600:
@@ -377,7 +390,7 @@ class MessageStore:
             logger.error(f"Failed to persist message {msg_id} for {session_name}: {e}")
 
     def mark_read(self, session_name_or_id: str, msg_ids: List[str]):
-        if self._disabled or not msg_ids:
+        if self._disabled or self.read_only or not msg_ids:
             return
         try:
             sess_id = self.resolve_session_id(session_name_or_id)
@@ -474,8 +487,8 @@ class MessageStore:
         new_name: str,
         session_id: Optional[str] = None
     ) -> str:
-        if self._disabled:
-            raise RuntimeError(f"MessageStore is disabled: {self.last_error}")
+        if self._disabled or self.read_only:
+            raise RuntimeError(f"MessageStore is read-only or disabled: {self.last_error}")
         sess_id = session_id or self.resolve_session_id(old_name)
         if not sess_id:
             sess_id = self.ensure_session(old_name)
@@ -528,7 +541,7 @@ class MessageStore:
         return sess_id
 
     def delete_message(self, session_name_or_id: str, msg_id: str):
-        if self._disabled:
+        if self._disabled or self.read_only:
             return
         try:
             sess_id = self.resolve_session_id(session_name_or_id)
@@ -542,7 +555,7 @@ class MessageStore:
             logger.error(f"Failed to delete message {msg_id} for {session_name_or_id}: {e}")
 
     def clear_session_messages(self, session_name_or_id: str):
-        if self._disabled:
+        if self._disabled or self.read_only:
             return
         try:
             sess_id = self.resolve_session_id(session_name_or_id)
@@ -561,7 +574,7 @@ class MessageStore:
         max_messages_per_session: int = 1000,
         max_unread_age_days: int = 90
     ):
-        if self._disabled:
+        if self._disabled or self.read_only:
             return
         try:
             conn = self._get_connection()

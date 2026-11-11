@@ -14,7 +14,9 @@ import asyncio
 import tempfile
 import atexit
 import unittest
+from unittest import mock
 import subprocess
+import io
 
 # Isolate host-native test runs from real ~/.claude/chatter-messages.db
 _suite_tmp_db_dir = tempfile.TemporaryDirectory()
@@ -789,6 +791,105 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
                 os.remove(fake_desc)
             if os.path.exists(name_file):
                 os.remove(name_file)
+
+    async def test_readonly_store_and_cli_leaves_no_sidecars_and_works_on_readonly_db(self):
+        ro_dir = os.path.join(self.tmp_dir.name, "ro_test_dir")
+        os.makedirs(ro_dir, exist_ok=True)
+        ro_db = os.path.join(ro_dir, "ro_messages.db")
+
+        import sqlite3
+        from claude_chatter.storage import SCHEMA_STATEMENTS
+        with sqlite3.connect(ro_db) as init_conn:
+            for stmt in SCHEMA_STATEMENTS:
+                init_conn.execute(stmt)
+            init_conn.execute("PRAGMA user_version = 2;")
+            init_conn.execute(
+                "INSERT INTO sessions (session_id, current_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("ro-id-1", "ro-sess", time.time(), time.time())
+            )
+            payload = json.dumps({"direction": "inbound", "read": False, "content": "ro test payload", "timestamp": time.time()})
+            init_conn.execute(
+                """
+                INSERT INTO messages (msg_id, session_id, session_name, direction, read, content, timestamp, entry_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("m_ro_1", "ro-id-1", "ro-sess", "inbound", 0, "ro test payload", time.time(), payload)
+            )
+
+        os.chmod(ro_db, 0o444)
+
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(ro_db, read_only=True)
+        self.assertFalse(store.is_disabled())
+        msgs = store.load_session_messages("ro-sess")
+        self.assertIn("m_ro_1", msgs)
+        store.close()
+
+        sidecars = [f for f in os.listdir(ro_dir) if f != "ro_messages.db"]
+        self.assertEqual(sidecars, [])
+
+        cmd = [sys.executable, "-m", "claude_chatter.cli", "--inbox", "--name", "ro-sess", "--db", ro_db]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        self.assertIn("m_ro_1", data)
+
+        sidecars_after = [f for f in os.listdir(ro_dir) if f != "ro_messages.db"]
+        self.assertEqual(sidecars_after, [])
+
+    async def test_resolve_session_name_with_multiple_live_descriptors(self):
+        work_dir = os.path.join(self.tmp_dir.name, "multi_live_ws")
+        os.makedirs(work_dir, exist_ok=True)
+        work_digest = hashlib.sha1(work_dir.encode("utf-8")).hexdigest()[:8]
+
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        p1 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+        p2 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+
+        desc1_path = os.path.join(sessions_dir, "bridge-sess-alpha.json")
+        desc2_path = os.path.join(sessions_dir, "bridge-sess-beta.json")
+
+        with open(desc1_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "name": "sess-alpha",
+                "pid": p1.pid,
+                "cwdDigest": work_digest,
+                "cwd": work_dir,
+                "projectPath": work_dir
+            }, f)
+
+        with open(desc2_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "name": "sess-beta",
+                "pid": p2.pid,
+                "cwdDigest": work_digest,
+                "cwd": work_dir,
+                "projectPath": work_dir
+            }, f)
+
+        try:
+            stderr_buf = io.StringIO()
+            with mock.patch("sys.stderr", stderr_buf):
+                res = ClaudeMessagingProtocol.resolve_session_name(project_path=work_dir, db_path=self.db_path)
+            self.assertEqual(res, "")
+            err_msg = stderr_buf.getvalue()
+            self.assertIn("Multiple live bridge sessions found for this workspace", err_msg)
+            self.assertIn("sess-alpha", err_msg)
+            self.assertIn("sess-beta", err_msg)
+
+            os.remove(desc2_path)
+            res_single = ClaudeMessagingProtocol.resolve_session_name(project_path=work_dir, db_path=self.db_path)
+            self.assertEqual(res_single, "sess-alpha")
+        finally:
+            p1.kill()
+            p2.kill()
+            p1.wait()
+            p2.wait()
+            if os.path.exists(desc1_path):
+                os.remove(desc1_path)
+            if os.path.exists(desc2_path):
+                os.remove(desc2_path)
 
     async def test_periodic_prune_on_save_message(self):
         from claude_chatter.storage import MessageStore

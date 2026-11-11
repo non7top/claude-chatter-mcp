@@ -98,7 +98,7 @@ def main():
             print(json.dumps({}, indent=2))
             sys.exit(0)
         from .storage import MessageStore
-        store = MessageStore(db_file)
+        store = MessageStore(db_file, read_only=True)
         all_msgs = store.load_session_messages(target_name)
         unread = {
             k: v for k, v in all_msgs.items()
@@ -119,7 +119,7 @@ def main():
             print(json.dumps({}, indent=2))
             sys.exit(0)
         from .storage import MessageStore
-        store = MessageStore(db_file)
+        store = MessageStore(db_file, read_only=True)
         all_msgs = store.load_session_messages(target_name)
         all_msgs = dict(sorted(all_msgs.items(), key=lambda kv: kv[1].get("timestamp", 0)))
         print(json.dumps(all_msgs, indent=2))
