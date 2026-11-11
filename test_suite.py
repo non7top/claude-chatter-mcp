@@ -792,49 +792,50 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
             if os.path.exists(name_file):
                 os.remove(name_file)
 
-    async def test_readonly_store_and_cli_leaves_no_sidecars_and_works_on_readonly_db(self):
+    async def test_readonly_store_and_cli_leaves_main_db_unmodified_and_works_on_readonly_db(self):
         ro_dir = os.path.join(self.tmp_dir.name, "ro_test_dir")
         os.makedirs(ro_dir, exist_ok=True)
         ro_db = os.path.join(ro_dir, "ro_messages.db")
 
-        import sqlite3
-        from claude_chatter.storage import SCHEMA_STATEMENTS
-        with sqlite3.connect(ro_db) as init_conn:
-            for stmt in SCHEMA_STATEMENTS:
-                init_conn.execute(stmt)
-            init_conn.execute("PRAGMA user_version = 2;")
-            init_conn.execute(
-                "INSERT INTO sessions (session_id, current_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                ("ro-id-1", "ro-sess", time.time(), time.time())
-            )
-            payload = json.dumps({"direction": "inbound", "read": False, "content": "ro test payload", "timestamp": time.time()})
-            init_conn.execute(
-                """
-                INSERT INTO messages (msg_id, session_id, session_name, direction, read, content, timestamp, entry_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("m_ro_1", "ro-id-1", "ro-sess", "inbound", 0, "ro test payload", time.time(), payload)
-            )
+        from claude_chatter.storage import MessageStore
+        init_store = MessageStore(ro_db)
+        init_store.ensure_session("ro-sess", session_id="ro-id-1")
+        init_store.save_message(
+            "m_ro_1",
+            {"direction": "inbound", "read": False, "content": "ro test payload", "timestamp": time.time()},
+            "ro-sess",
+            session_id="ro-id-1"
+        )
+        init_store.close()
+
+        with open(ro_db, "rb") as f:
+            original_hash = hashlib.sha256(f.read()).hexdigest()
 
         os.chmod(ro_db, 0o444)
 
-        from claude_chatter.storage import MessageStore
         store = MessageStore(ro_db, read_only=True)
         self.assertFalse(store.is_disabled())
         msgs = store.load_session_messages("ro-sess")
         self.assertIn("m_ro_1", msgs)
         store.close()
 
-        sidecars = [f for f in os.listdir(ro_dir) if f != "ro_messages.db"]
-        self.assertEqual(sidecars, [])
+        with open(ro_db, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), original_hash)
+
+        wal_file = ro_db + "-wal"
+        if os.path.exists(wal_file):
+            self.assertEqual(os.path.getsize(wal_file), 0)
 
         cmd = [sys.executable, "-m", "claude_chatter.cli", "--inbox", "--name", "ro-sess", "--db", ro_db]
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(res.stdout)
         self.assertIn("m_ro_1", data)
 
-        sidecars_after = [f for f in os.listdir(ro_dir) if f != "ro_messages.db"]
-        self.assertEqual(sidecars_after, [])
+        with open(ro_db, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), original_hash)
+
+        if os.path.exists(wal_file):
+            self.assertEqual(os.path.getsize(wal_file), 0)
 
     async def test_resolve_session_name_with_multiple_live_descriptors(self):
         work_dir = os.path.join(self.tmp_dir.name, "multi_live_ws")

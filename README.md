@@ -222,7 +222,7 @@ Execute single-shot operations directly from terminal:
 
 **Files the bridge reads or writes** (all under `~/.claude/`):
 * `sessions/` - Claude Code's session descriptors and `.key` files; the bridge reads them and writes its own descriptor and key.
-* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600. Read and outbound messages are kept for 30 days (capped at 1,000 per session); unread inbound messages are preserved up to 90 days.
+* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600. Read and outbound messages are kept for 30 days (capped at 1,000 per session); unread inbound messages are preserved up to 90 days. In SQLite WAL mode, read-only inspect commands (`--inbox`, `--history`) access the database with `mode=ro` and do not alter stored data, though SQLite may create empty `.db-wal` and `.db-shm` files for WAL index coordination.
 * `logs/claude-chatter.log` - shared by all bridge processes (also written to stderr); rotates at 5 MiB, 3 backups.
 * `chatter-session-names/` - the generated or renamed session name and stable session ID per project path.
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).

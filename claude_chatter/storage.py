@@ -206,6 +206,8 @@ class MessageStore:
         if self._conn is None:
             if self.read_only:
                 try:
+                    # In SQLite WAL mode, read-only connections use mode=ro to avoid schema/WAL
+                    # mutations. SQLite WAL index coordination may create empty .db-wal / .db-shm files.
                     uri = f"file:{os.path.abspath(self.db_path)}?mode=ro"
                     self._conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
                     self._conn.row_factory = sqlite3.Row
