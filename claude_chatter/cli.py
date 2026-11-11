@@ -43,11 +43,14 @@ def main():
     parser = argparse.ArgumentParser(description="Claude Bridge MCP Server & Standalone CLI Tool")
     parser.add_argument("--socket", type=str, default=None, help="Path to bridge Unix socket")
     parser.add_argument("--name", type=str, default=None, help="Session name announced to Claude Code (default: derived from cwd, stable across restarts)")
+    parser.add_argument("--db", type=str, default=None, help="Path to SQLite database for message persistence")
 
     mode_group = parser.add_argument_group("Execution Modes")
     mode_group.add_argument("--standalone", "--daemon", action="store_true", help="Run as standalone daemon server without stdio MCP loop")
     mode_group.add_argument("--list", action="store_true", help="List all active Claude Code sessions")
     mode_group.add_argument("--jobs", action="store_true", help="List Claude Code background jobs (including finished ones) from ~/.claude/jobs")
+    mode_group.add_argument("--inbox", action="store_true", help="List unread inbound messages from persisted inbox")
+    mode_group.add_argument("--history", action="store_true", help="List full persisted message history")
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--prime", action="store_true", help="From an Antigravity shell tool: hand this agy's push endpoint to its bridge so it can wake the session on inbound messages")
     mode_group.add_argument("--prime-hook", action="store_true", help="Antigravity PreInvocation hook: reads hook JSON on stdin and prints the JSON that makes the session prime push (see --prime)")
@@ -67,7 +70,7 @@ def main():
         sys.exit(0 if result.get("ok") else 1)
 
     elif args.list:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_list():
             peers = await protocol.verify_and_purge_sessions()
@@ -77,7 +80,7 @@ def main():
 
     elif args.jobs:
         from .jobs import list_jobs
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_jobs():
             peers = await protocol.verify_and_purge_sessions()
@@ -85,8 +88,46 @@ def main():
         asyncio.run(_cmd_jobs())
         sys.exit(0)
 
+    elif args.inbox:
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name, db_path=args.db)
+        if not target_name:
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        db_file = args.db or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if not os.path.exists(db_file):
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        from .storage import MessageStore
+        store = MessageStore(db_file, read_only=True)
+        all_msgs = store.load_session_messages(target_name)
+        unread = {
+            k: v for k, v in all_msgs.items()
+            if v.get("direction") == "inbound" and not v.get("read", False)
+        }
+        unread = dict(sorted(unread.items(), key=lambda kv: kv[1].get("timestamp", 0)))
+        print(json.dumps(unread, indent=2))
+        store.close()
+        sys.exit(0)
+
+    elif args.history:
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name, db_path=args.db)
+        if not target_name:
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        db_file = args.db or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if not os.path.exists(db_file):
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        from .storage import MessageStore
+        store = MessageStore(db_file, read_only=True)
+        all_msgs = store.load_session_messages(target_name)
+        all_msgs = dict(sorted(all_msgs.items(), key=lambda kv: kv[1].get("timestamp", 0)))
+        print(json.dumps(all_msgs, indent=2))
+        store.close()
+        sys.exit(0)
+
     elif args.purge:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_purge():
             peers = await protocol.verify_and_purge_sessions()
@@ -95,7 +136,7 @@ def main():
         sys.exit(0)
 
     elif args.send:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
         target_session, message_text = args.send[0], args.send[1]
 
         async def _cmd_send():
@@ -110,7 +151,7 @@ def main():
         sys.exit(0)
 
     elif args.standalone:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db, as_bridge=True)
         try:
             asyncio.run(run_standalone(protocol))
         except (KeyboardInterrupt, SystemExit):
@@ -121,7 +162,7 @@ def main():
 
     else:
         from .mcp_server import run_mcp_server, make_protocol
-        protocol = make_protocol(args.socket, args.name)
+        protocol = make_protocol(args.socket, args.name, db_path=args.db)
         try:
             asyncio.run(run_mcp_server(protocol))
         except (KeyboardInterrupt, SystemExit):

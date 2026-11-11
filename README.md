@@ -148,14 +148,16 @@ Dispatches an authenticated user message frame to a target Claude Code session. 
   * `message` (string, required): Text message content to deliver.
 
 ### 4. `read_messages`
-Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound messages are buffered in memory; push can wake a primed Antigravity session when one arrives, but it is best effort, so also call this periodically or after a `tools/list_changed` notification.
+Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound and outbound messages are persisted in a local SQLite database (`~/.claude/chatter-messages.db`), so unread messages and message history survive bridge and host restarts. Push can wake a primed Antigravity session when one arrives, but it is best effort, so also call this periodically or after a `tools/list_changed` notification.
 * **Arguments**:
   * `mark_read` (boolean, optional, default true): set false to peek without consuming.
 
 ### 5. `get_responses`
-Queries the full inbound and outbound message history cached in memory, regardless of read state.
+Queries inbound and outbound message history persisted across bridge restarts (newest first).
 * **Arguments**:
   * `msg_id` (string, optional): Specific message ID filter.
+  * `limit` (integer, optional): Maximum number of messages to return (newest first).
+  * `offset` (integer, optional, default 0): Number of messages to skip when paginating.
 
 ### 6. `enable_push`
 Returns the shell command that primes push for this conversation (see above) and whether push is already primed.
@@ -166,7 +168,7 @@ Manually triggers proactive scanning and deletion of dead socket descriptors and
 * **Arguments**: None
 
 ### 8. `rename_session`
-Renames this bridge's announced session descriptor in `~/.claude/sessions/` so surrounding Claude Code processes discover it under the new name via `ListAgents`.
+Renames this bridge's announced session descriptor in `~/.claude/sessions/` so surrounding Claude Code processes discover it under the new name via `ListAgents`. Tracks stable session identity and alias history in SQLite across renames, safely merging message histories without collisions. When renaming onto a session name with existing message history in storage, duplicate message IDs retain the renamed session's copy. Renaming is rejected if the target name is currently held by an active session.
 * **Arguments**:
   * `new_name` (string, required): The new session name to announce (e.g. `bridge-dev`). Without a rename, the name defaults to `<project basename>-<2 random alphanumerics>`, generated once and stored per project path in `~/.claude/chatter-session-names/`; a rename overwrites the stored name. Under `agy` the project path is the agy process's working directory, because `agy` does not expose its conversation title to MCP servers, the shell environment or the status line payload (requested upstream: [google-antigravity/antigravity-cli#1415](https://github.com/google-antigravity/antigravity-cli/issues/1415)). Override with `--name` or `CHATTER_SESSION_NAME`.
 
@@ -201,6 +203,14 @@ Execute single-shot operations directly from terminal:
   ```bash
   bridge-mcp --jobs
   ```
+* **Check Inbox** (displays unread inbound messages without marking them read):
+  ```bash
+  bridge-mcp --inbox
+  ```
+* **View Message History**:
+  ```bash
+  bridge-mcp --history
+  ```
 * **Send Message to Session** (fire-and-forget; any reply arrives later as its own inbound message):
   ```bash
   bridge-mcp --send rgle "Hello from CLI"
@@ -212,8 +222,9 @@ Execute single-shot operations directly from terminal:
 
 **Files the bridge reads or writes** (all under `~/.claude/`):
 * `sessions/` - Claude Code's session descriptors and `.key` files; the bridge reads them and writes its own descriptor and key.
+* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600. Read and outbound messages are kept for 30 days (capped at 1,000 per session); unread inbound messages are preserved up to 90 days. In SQLite WAL mode, read-only inspect commands (`--inbox`, `--history`) access the database with `mode=ro` and do not alter stored data, though SQLite may create empty `.db-wal` and `.db-shm` files for WAL index coordination.
 * `logs/claude-chatter.log` - shared by all bridge processes (also written to stderr); rotates at 5 MiB, 3 backups.
-* `chatter-session-names/` - the generated or renamed session name per project path.
+* `chatter-session-names/` - the generated or renamed session name and stable session ID per project path.
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).
 * `chatter-bin/bridge-mcp` - a stable symlink to this install, so the prime command can be allow-listed.
 

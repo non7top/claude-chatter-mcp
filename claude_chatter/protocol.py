@@ -9,6 +9,7 @@ reusable core that both the MCP entry point (mcp_server.py) and the
 standalone daemon entry point (standalone.py) build on top of.
 """
 import os
+import sys
 import re
 import json
 import glob
@@ -16,12 +17,15 @@ import uuid
 import stat
 import time
 import string
+import sqlite3
 import hashlib
 import secrets
 import asyncio
 import logging
 import psutil
 from typing import Any, Callable, Dict, Optional
+
+from .storage import MessageStore, ResponseStore
 
 logger = logging.getLogger("SocketBridgeMCP")
 
@@ -31,7 +35,12 @@ class ClaudeMessagingProtocol:
         self,
         bridge_socket_path: Optional[str] = None,
         session_name: Optional[str] = None,
-        on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        db_path: Optional[str] = None,
+        enable_storage: bool = True,
+        session_id: Optional[str] = None,
+        as_bridge: bool = True,
+        read_only: bool = False
     ):
         """
         on_inbound_message(method, params), if given, is invoked whenever a real
@@ -43,6 +52,8 @@ class ClaudeMessagingProtocol:
         self.home_dir = os.path.expanduser("~")
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
         self.on_inbound_message = on_inbound_message
+        self.as_bridge = as_bridge
+        self.read_only = read_only
 
         env_name = os.environ.get("CHATTER_SESSION_NAME") or os.environ.get("AGY_SESSION_NAME")
         self.session_name = session_name or env_name or self._derive_default_session_name()
@@ -55,11 +66,63 @@ class ClaudeMessagingProtocol:
         else:
             self.bridge_socket_path = self._get_default_socket_path(self.pid, self.session_name)
 
-        # Historical datastore for storing response payloads
-        self.response_store: Dict[str, Dict[str, Any]] = {}
+        if enable_storage:
+            self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
+            self.store = MessageStore(self.db_path, read_only=self.read_only)
+            if not self.read_only:
+                self.store.prune()
+            if session_id:
+                self.session_id = session_id
+            elif getattr(self, "_is_clashing", False):
+                self.session_id = str(uuid.uuid4())
+            else:
+                existing_id = self.store.resolve_session_id(self.session_name)
+                if existing_id:
+                    self.session_id = existing_id
+                else:
+                    persisted_name = self.read_persisted_session_name()
+                    if not session_name or session_name == persisted_name:
+                        self.session_id = self._derive_session_id()
+                    else:
+                        self.session_id = str(uuid.uuid4())
+            if not self.read_only:
+                self.store.ensure_session(self.session_name, cwd_digest=self._cwd_digest(), session_id=self.session_id)
+                if self.as_bridge and not getattr(self, "_is_clashing", False) and not session_name and not env_name:
+                    self.persist_default_session_name(self.session_name)
+                    self.persist_session_id(self.session_id)
+            initial_messages = self.store.load_session_messages(self.session_id or self.session_name)
+            self.response_store = ResponseStore(
+                store=self.store,
+                session_name=self.session_name,
+                session_id=self.session_id,
+                cwd_digest=self._cwd_digest(),
+                initial=initial_messages
+            )
+        else:
+            self.db_path = None
+            self.store = None
+            if session_id:
+                self.session_id = session_id
+            elif getattr(self, "_is_clashing", False):
+                self.session_id = str(uuid.uuid4())
+            elif not session_name:
+                self.session_id = self._derive_session_id()
+            else:
+                self.session_id = str(uuid.uuid4())
+            if not self.read_only and self.as_bridge and not getattr(self, "_is_clashing", False) and not session_name and not env_name:
+                self.persist_default_session_name(self.session_name)
+                self.persist_session_id(self.session_id)
+            self.response_store = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
-    def _project_path(self) -> str:
+    @property
+    def persistence_error(self) -> Optional[str]:
+        if self.store and self.store.is_disabled():
+            return self.store.last_error or "MessageStore is disabled"
+        return None
+
+    @staticmethod
+    def _find_project_path() -> str:
         # A plugin-launched server runs in the plugin's install directory, so
         # the agy process above it is the only place the project path lives.
         try:
@@ -70,13 +133,129 @@ class ClaudeMessagingProtocol:
             pass
         return os.getcwd()
 
+    @staticmethod
+    def read_persisted_session_name(project_path: Optional[str] = None) -> str:
+        path = project_path or ClaudeMessagingProtocol._find_project_path()
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+        name_path = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names", f"{digest}.name")
+        try:
+            with open(name_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    @classmethod
+    def resolve_session_name(
+        cls,
+        explicit_name: Optional[str] = None,
+        project_path: Optional[str] = None,
+        db_path: Optional[str] = None
+    ) -> str:
+        if explicit_name:
+            return explicit_name
+        env_name = os.environ.get("CHATTER_SESSION_NAME") or os.environ.get("AGY_SESSION_NAME")
+        if env_name:
+            return env_name
+
+        path = project_path or cls._find_project_path()
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        live_candidates = set()
+        if os.path.exists(sessions_dir):
+            for desc_file in glob.glob(os.path.join(sessions_dir, "bridge-*.json")):
+                try:
+                    with open(desc_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    raw_pid = data.get("pid")
+                    try:
+                        pid = int(raw_pid)
+                    except (TypeError, ValueError):
+                        pid = None
+                    if not cls._static_is_pid_alive(pid):
+                        continue
+                    file_digest = data.get("cwdDigest")
+                    if not file_digest:
+                        file_cwd = data.get("projectPath") or data.get("cwd")
+                        if file_cwd:
+                            file_digest = hashlib.sha1(file_cwd.encode("utf-8")).hexdigest()[:8]
+                    if file_digest == digest:
+                        sname = data.get("name")
+                        if sname:
+                            live_candidates.add(sname)
+                except Exception:
+                    pass
+
+        if len(live_candidates) == 1:
+            return next(iter(live_candidates))
+        elif len(live_candidates) > 1:
+            candidates_str = ", ".join(sorted(live_candidates))
+            sys.stderr.write(
+                f"Multiple live bridge sessions found for this workspace ({candidates_str}). "
+                f"Please specify --name to disambiguate.\n"
+            )
+            return ""
+
+        db = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if os.path.exists(db):
+            try:
+                uri = f"file:{os.path.abspath(db)}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
+                    cur = conn.execute(
+                        "SELECT current_name FROM sessions WHERE cwd_digest = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                        (digest,)
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return row[0]
+            except Exception:
+                pass
+
+        persisted = cls.read_persisted_session_name(path)
+        if persisted:
+            return persisted
+
+        return ""
+
+    def _project_path(self) -> str:
+        return self._find_project_path()
+
     def _cwd_digest(self) -> str:
         return hashlib.sha1(self._project_path().encode("utf-8")).hexdigest()[:8]
 
     def _persisted_name_path(self, cwd_digest: str) -> str:
         d = os.path.join(self.home_dir, ".claude", "chatter-session-names")
-        os.makedirs(d, exist_ok=True)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
         return os.path.join(d, f"{cwd_digest}.name")
+
+    def _persisted_id_path(self, cwd_digest: str) -> str:
+        d = os.path.join(self.home_dir, ".claude", "chatter-session-names")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return os.path.join(d, f"{cwd_digest}.id")
+
+    def _derive_session_id(self) -> str:
+        id_path = self._persisted_id_path(self._cwd_digest())
+        try:
+            with open(id_path, "r", encoding="utf-8") as f:
+                sid = f.read().strip()
+                if sid:
+                    return sid
+        except OSError:
+            pass
+        sid = str(uuid.uuid4())
+        if self.as_bridge and not self.read_only:
+            try:
+                with open(id_path, "w", encoding="utf-8") as f:
+                    f.write(sid)
+            except OSError:
+                pass
+        return sid
 
     def _derive_default_session_name(self) -> str:
         """
@@ -98,8 +277,10 @@ class ClaudeMessagingProtocol:
             persisted = ""
         if not persisted:
             persisted = self._random_session_name()
-            self.persist_default_session_name(persisted)
-        if self._session_name_in_use(persisted):
+            if self.as_bridge and not self.read_only:
+                self.persist_default_session_name(persisted)
+        if self._session_name_in_use(persisted, wait_if_same_cwd=self.as_bridge):
+            self._is_clashing = True
             return self._random_session_name()
         return persisted
 
@@ -108,17 +289,56 @@ class ClaudeMessagingProtocol:
         suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(2))
         return f"{basename}-{suffix}"
 
-    def _session_name_in_use(self, name: str) -> bool:
-        for path in glob.glob(os.path.join(self.sessions_dir, "*.json")):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except (OSError, ValueError):
-                continue
-            pid = meta.get("pid")
-            if meta.get("name") == name and pid != self.pid and self._is_pid_alive(pid):
+    @staticmethod
+    def _static_is_pid_alive(pid: Optional[int]) -> bool:
+        if not pid or not isinstance(pid, int):
+            return False
+        try:
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        except Exception:
+            return False
+
+    def _is_pid_alive(self, pid: Optional[int]) -> bool:
+        return self._static_is_pid_alive(pid)
+
+    def _session_name_in_use(
+        self,
+        name: str,
+        wait_if_same_cwd: bool = False,
+        max_wait: float = 1.5,
+        poll_interval: float = 0.1
+    ) -> bool:
+        start_time = time.time()
+        while True:
+            in_use_by_other = False
+            same_cwd = False
+            for path in glob.glob(os.path.join(self.sessions_dir, "*.json")):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                pid = meta.get("pid")
+                if meta.get("name") == name and pid != self.pid and self._is_pid_alive(pid):
+                    in_use_by_other = True
+                    desc_proj = meta.get("projectPath") or meta.get("cwd") or ""
+                    desc_digest = meta.get("cwdDigest") or ""
+                    if (desc_digest and desc_digest == self._cwd_digest()) or (
+                        desc_proj and os.path.realpath(desc_proj) == os.path.realpath(self._project_path())
+                    ):
+                        same_cwd = True
+                    break
+
+            if not in_use_by_other:
+                return False
+
+            if not wait_if_same_cwd or not same_cwd or (time.time() - start_time) >= max_wait:
                 return True
-        return False
+
+            time.sleep(poll_interval)
 
     def persist_default_session_name(self, name: str):
         """
@@ -134,6 +354,14 @@ class ClaudeMessagingProtocol:
         except OSError as e:
             logger.error(f"Failed to persist session name '{name}': {e}")
 
+    def persist_session_id(self, session_id: str):
+        try:
+            with open(self._persisted_id_path(self._cwd_digest()), "w", encoding="utf-8") as f:
+                f.write(session_id)
+            logger.info(f"Persisted '{session_id}' as this workspace's session id.")
+        except OSError as e:
+            logger.error(f"Failed to persist session id '{session_id}': {e}")
+
     def _get_default_socket_path(self, pid: int, session_name: Optional[str] = None) -> str:
         sname = (session_name or getattr(self, "session_name", "bridge")).replace("/", "-")
         try:
@@ -148,21 +376,6 @@ class ClaudeMessagingProtocol:
         except Exception:
             pass
         return f"/tmp/bridge_{sname}.sock"
-
-    def _is_pid_alive(self, pid: Optional[int]) -> bool:
-        if not pid or not isinstance(pid, int):
-            return False
-        try:
-            # A zombie still satisfies psutil.pid_exists()/os.kill(pid, 0) - it occupies
-            # a process table entry until its parent reaps it - so either check alone
-            # can report a daemon we just killed as still "alive" indefinitely. Check
-            # its actual status too.
-            proc = psutil.Process(pid)
-            return proc.status() != psutil.STATUS_ZOMBIE
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return False
-        except Exception:
-            return False
 
     async def verify_and_purge_sessions(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -247,6 +460,8 @@ class ClaudeMessagingProtocol:
                 logger.error(f"Error checking session file {file_path}: {e}")
 
         self.active_peers = current_sessions
+        if self.store:
+            self.store.prune()
         logger.info(f"Session analysis complete. Active peers: {len(current_sessions)}, Purged: {purged_count}")
         return self.active_peers
 
@@ -366,7 +581,8 @@ class ClaudeMessagingProtocol:
                 "target_session": peer["name"],
                 "target_pid": peer["pid"],
                 "content": message_content,
-                "response": ""
+                "response": "",
+                "timestamp": time.time()
             }
             self.response_store[msg_id] = entry
             logger.info(f"Successfully dispatched message {msg_id} to {peer['name']}")
@@ -455,6 +671,8 @@ class ClaudeMessagingProtocol:
             "pid": self.registered_pid,
             "sessionId": self.registered_session_id,
             "cwd": os.getcwd(),
+            "projectPath": self._project_path(),
+            "cwdDigest": self._cwd_digest(),
             "startedAt": now,
             "procStart": self._compute_proc_start(self.registered_pid),
             "version": "2.1.282",
@@ -485,7 +703,7 @@ class ClaudeMessagingProtocol:
                 json.dump(session_data, f, indent=2)
             with open(os.open(self.session_key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
                 json.dump(key_data, f, indent=2)
-            logger.info(f"🚀 Registered bridge session descriptor '{session_name}' (PID {self.registered_pid}) in {self.sessions_dir}")
+            logger.info(f"Registered bridge session descriptor '{session_name}' (PID {self.registered_pid}) in {self.sessions_dir}")
         except Exception as e:
             logger.error(f"Failed to register session descriptor: {e}")
 
@@ -609,9 +827,31 @@ class ClaudeMessagingProtocol:
         }
         unread = dict(sorted(unread.items(), key=lambda kv: kv[1].get("timestamp", 0)))
         if mark_read:
-            for entry in unread.values():
+            to_mark = []
+            for msg_id, entry in unread.items():
                 entry["read"] = True
+                to_mark.append(msg_id)
+            if to_mark and isinstance(self.response_store, ResponseStore):
+                self.response_store.mark_read(to_mark)
         return unread
+
+    def rename_session_in_store(self, old_name: str, new_name: str):
+        """
+        Renames the session in SQLite storage, migrating message histories.
+        When renaming onto a session name with existing message history in
+        storage, duplicate msg_ids retain the renamed session's copy.
+        """
+        if self.store:
+            self.session_id = self.store.rename_session(
+                old_name,
+                new_name,
+                session_id=getattr(self, "session_id", None)
+            )
+        self.persist_default_session_name(new_name)
+        if getattr(self, "session_id", None):
+            self.persist_session_id(self.session_id)
+        if isinstance(self.response_store, ResponseStore):
+            self.response_store.set_session_name(new_name, getattr(self, "session_id", None))
 
     async def start_bridge_listener(self):
         """
@@ -630,7 +870,7 @@ class ClaudeMessagingProtocol:
             )
             # Apply secure single-user runtime read/write bounds
             os.chmod(self.bridge_socket_path, stat.S_IRUSR | stat.S_IWUSR)
-            logger.info(f"🚀 Bridge server operational on: {self.bridge_socket_path}")
+            logger.info(f"Bridge server operational on: {self.bridge_socket_path}")
 
             async with server:
                 await server.serve_forever()
@@ -640,6 +880,8 @@ class ClaudeMessagingProtocol:
             logger.error(f"Bridge listener server error: {e}")
 
     def cleanup_socket(self):
+        if self.store:
+            self.store.close()
         if os.path.exists(self.bridge_socket_path):
             try:
                 os.remove(self.bridge_socket_path)
