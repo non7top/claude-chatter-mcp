@@ -11,7 +11,7 @@ import argparse
 from logging.handlers import RotatingFileHandler
 
 from .protocol import ClaudeMessagingProtocol
-from .standalone import run_standalone
+from claude_chatter.standalone import run_standalone
 # mcp_server pulls in fastmcp, which only the default (MCP stdio) mode needs -
 # import it lazily so --list/--send/--purge/--standalone don't pay that cost.
 
@@ -79,7 +79,7 @@ def main():
         sys.exit(0)
 
     elif args.jobs:
-        from .jobs import list_jobs
+        from claude_chatter.jobs import list_jobs
         protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_jobs():
@@ -97,7 +97,7 @@ def main():
         if not os.path.exists(db_file):
             print(json.dumps({}, indent=2))
             sys.exit(0)
-        from .storage import MessageStore
+        from claude_chatter.storage import MessageStore
         store = MessageStore(db_file, read_only=True)
         all_msgs = store.load_session_messages(target_name)
         unread = {
@@ -118,7 +118,7 @@ def main():
         if not os.path.exists(db_file):
             print(json.dumps({}, indent=2))
             sys.exit(0)
-        from .storage import MessageStore
+        from claude_chatter.storage import MessageStore
         store = MessageStore(db_file, read_only=True)
         all_msgs = store.load_session_messages(target_name)
         all_msgs = dict(sorted(all_msgs.items(), key=lambda kv: kv[1].get("timestamp", 0)))

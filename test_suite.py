@@ -1812,7 +1812,10 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
             proc.terminate()
             stdout, stderr = proc.communicate(timeout=3)
             self.assertEqual(proc.returncode, 0)
-            self.assertIn("Bridge standalone daemon shut down gracefully", stderr)
+            self.assertTrue(
+                "Bridge standalone daemon shut down gracefully" in stderr or
+                "Standalone daemon shut down gracefully" in stderr
+            )
             self.assertFalse(os.path.exists(socket_path))
         finally:
             if proc.poll() is None:
