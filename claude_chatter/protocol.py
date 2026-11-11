@@ -23,6 +23,8 @@ import logging
 import psutil
 from typing import Any, Callable, Dict, Optional
 
+from .storage import MessageStore, ResponseStore
+
 logger = logging.getLogger("SocketBridgeMCP")
 
 
@@ -31,7 +33,8 @@ class ClaudeMessagingProtocol:
         self,
         bridge_socket_path: Optional[str] = None,
         session_name: Optional[str] = None,
-        on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        db_path: Optional[str] = None
     ):
         """
         on_inbound_message(method, params), if given, is invoked whenever a real
@@ -55,8 +58,16 @@ class ClaudeMessagingProtocol:
         else:
             self.bridge_socket_path = self._get_default_socket_path(self.pid, self.session_name)
 
-        # Historical datastore for storing response payloads
-        self.response_store: Dict[str, Dict[str, Any]] = {}
+        self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
+        self.store = MessageStore(self.db_path)
+        self.store.prune()
+        initial_messages = self.store.load_session_messages(self.session_name)
+        self.response_store = ResponseStore(
+            store=self.store,
+            session_name=self.session_name,
+            cwd_digest=self._cwd_digest(),
+            initial=initial_messages
+        )
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
     def _project_path(self) -> str:
@@ -366,7 +377,8 @@ class ClaudeMessagingProtocol:
                 "target_session": peer["name"],
                 "target_pid": peer["pid"],
                 "content": message_content,
-                "response": ""
+                "response": "",
+                "timestamp": time.time()
             }
             self.response_store[msg_id] = entry
             logger.info(f"Successfully dispatched message {msg_id} to {peer['name']}")
@@ -609,9 +621,19 @@ class ClaudeMessagingProtocol:
         }
         unread = dict(sorted(unread.items(), key=lambda kv: kv[1].get("timestamp", 0)))
         if mark_read:
-            for entry in unread.values():
+            to_mark = []
+            for msg_id, entry in unread.items():
                 entry["read"] = True
+                to_mark.append(msg_id)
+            if to_mark and hasattr(self.response_store, "mark_read"):
+                self.response_store.mark_read(to_mark)
         return unread
+
+    def rename_session_in_store(self, old_name: str, new_name: str):
+        if hasattr(self, "store") and self.store:
+            self.store.rename_session(old_name, new_name)
+        if hasattr(self, "response_store") and hasattr(self.response_store, "set_session_name"):
+            self.response_store.set_session_name(new_name)
 
     async def start_bridge_listener(self):
         """
@@ -640,6 +662,8 @@ class ClaudeMessagingProtocol:
             logger.error(f"Bridge listener server error: {e}")
 
     def cleanup_socket(self):
+        if hasattr(self, "store") and self.store:
+            self.store.close()
         if os.path.exists(self.bridge_socket_path):
             try:
                 os.remove(self.bridge_socket_path)

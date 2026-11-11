@@ -148,14 +148,16 @@ Dispatches an authenticated user message frame to a target Claude Code session. 
   * `message` (string, required): Text message content to deliver.
 
 ### 4. `read_messages`
-Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound messages are buffered in memory; push can wake a primed Antigravity session when one arrives, but it is best effort, so also call this periodically or after a `tools/list_changed` notification.
+Returns unread inbound messages (oldest first), keyed by message ID, and marks them read. Inbound and outbound messages are persisted in a local SQLite database (`~/.claude/chatter-messages.db`), so unread messages and message history survive bridge and host restarts. Push can wake a primed Antigravity session when one arrives, but it is best effort, so also call this periodically or after a `tools/list_changed` notification.
 * **Arguments**:
   * `mark_read` (boolean, optional, default true): set false to peek without consuming.
 
 ### 5. `get_responses`
-Queries the full inbound and outbound message history cached in memory, regardless of read state.
+Queries inbound and outbound message history persisted across bridge restarts.
 * **Arguments**:
   * `msg_id` (string, optional): Specific message ID filter.
+  * `limit` (integer, optional): Maximum number of messages to return (newest first).
+  * `offset` (integer, optional, default 0): Number of messages to skip when paginating.
 
 ### 6. `enable_push`
 Returns the shell command that primes push for this conversation (see above) and whether push is already primed.
@@ -201,6 +203,14 @@ Execute single-shot operations directly from terminal:
   ```bash
   bridge-mcp --jobs
   ```
+* **Check Inbox** (displays unread inbound messages without marking them read):
+  ```bash
+  bridge-mcp --inbox
+  ```
+* **View Message History**:
+  ```bash
+  bridge-mcp --history
+  ```
 * **Send Message to Session** (fire-and-forget; any reply arrives later as its own inbound message):
   ```bash
   bridge-mcp --send rgle "Hello from CLI"
@@ -212,6 +222,7 @@ Execute single-shot operations directly from terminal:
 
 **Files the bridge reads or writes** (all under `~/.claude/`):
 * `sessions/` - Claude Code's session descriptors and `.key` files; the bridge reads them and writes its own descriptor and key.
+* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600.
 * `logs/claude-chatter.log` - shared by all bridge processes (also written to stderr); rotates at 5 MiB, 3 backups.
 * `chatter-session-names/` - the generated or renamed session name per project path.
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).

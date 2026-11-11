@@ -211,6 +211,7 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         protocol.session_name = new_name
         protocol.register_session_descriptor(session_name=new_name)
         protocol.persist_default_session_name(new_name)
+        protocol.rename_session_in_store(old_name, new_name)
         res = {
             "success": True,
             "previous_name": old_name,
@@ -253,16 +254,40 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    async def get_responses(msg_id: Optional[str] = None) -> str:
-        """Fetches the full inbound and outbound message history cached by the bridge, regardless of read state. Use read_messages instead to check for new inbound messages specifically."""
-        resp = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."}) if msg_id else protocol.response_store
+    async def get_responses(
+        msg_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> str:
+        """Fetches inbound and outbound message history persisted across bridge restarts. Supports pagination via limit and offset (newest first). Use read_messages instead to check for new inbound messages specifically."""
+        if msg_id:
+            resp = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."})
+        elif limit is not None or offset > 0:
+            off = max(0, offset)
+            lim = max(0, limit) if limit is not None else None
+            sorted_items = sorted(
+                protocol.response_store.items(),
+                key=lambda kv: kv[1].get("timestamp", 0),
+                reverse=True
+            )
+            resp = dict(sorted_items[off : (off + lim) if lim is not None else None])
+        else:
+            resp = protocol.response_store
         return json.dumps(resp, indent=2)
 
     return mcp
 
 
-def make_protocol(bridge_socket_path: Optional[str], session_name: Optional[str]) -> ClaudeMessagingProtocol:
-    return ClaudeMessagingProtocol(bridge_socket_path=bridge_socket_path, session_name=session_name)
+def make_protocol(
+    bridge_socket_path: Optional[str],
+    session_name: Optional[str],
+    db_path: Optional[str] = None
+) -> ClaudeMessagingProtocol:
+    return ClaudeMessagingProtocol(
+        bridge_socket_path=bridge_socket_path,
+        session_name=session_name,
+        db_path=db_path
+    )
 
 
 async def run_mcp_server(protocol: ClaudeMessagingProtocol):

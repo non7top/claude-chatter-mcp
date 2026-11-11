@@ -193,9 +193,14 @@ class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
 class TestUnreadMessages(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
+        self.db_path = os.path.join(self.tmp_dir.name, "unread_test.db")
+        self.bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"),
+            db_path=self.db_path
+        )
 
     async def asyncTearDown(self):
+        self.bridge.cleanup_socket()
         self.tmp_dir.cleanup()
 
     async def test_get_unread_messages_marks_read_and_excludes_outbound(self):
@@ -234,6 +239,246 @@ class TestUnreadMessages(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.bridge.response_store["in_1"]["read"])
         # still there on the next real read
         self.assertEqual(list(self.bridge.get_unread_messages().keys()), ["in_1"])
+
+
+class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp_dir.name, "test_messages.db")
+        self.sock_path = os.path.join(self.tmp_dir.name, "test_bridge.sock")
+        self.session_name = "test-session-persist"
+
+    async def asyncTearDown(self):
+        self.tmp_dir.cleanup()
+
+    async def test_inbound_message_persists_across_bridge_restart(self):
+        bridge1 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        server_task = asyncio.create_task(bridge1.start_bridge_listener())
+        await asyncio.sleep(0.1)
+
+        reader, writer = await asyncio.open_unix_connection(self.sock_path)
+        msg_id = "persist_in_1"
+        frame = {
+            "msgV": 1,
+            "msg_id": msg_id,
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "Hello from peer"
+            },
+            "sender": "sender_session"
+        }
+        writer.write((json.dumps(frame) + "\n").encode("utf-8"))
+        await writer.drain()
+        await asyncio.sleep(0.1)
+        writer.close()
+        await writer.wait_closed()
+
+        self.assertIn(msg_id, bridge1.response_store)
+        self.assertFalse(bridge1.response_store[msg_id]["read"])
+
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        bridge1.cleanup_socket()
+
+        bridge2 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        self.assertIn(msg_id, bridge2.response_store)
+        unread = bridge2.get_unread_messages(mark_read=False)
+        self.assertIn(msg_id, unread)
+        self.assertEqual(unread[msg_id]["content"], "Hello from peer")
+        self.assertEqual(unread[msg_id]["sender"], "sender_session")
+        self.assertFalse(unread[msg_id]["read"])
+
+        consumed = bridge2.get_unread_messages(mark_read=True)
+        self.assertIn(msg_id, consumed)
+        self.assertTrue(bridge2.response_store[msg_id]["read"])
+        bridge2.cleanup_socket()
+
+        bridge3 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        self.assertEqual(bridge3.get_unread_messages(), {})
+        self.assertIn(msg_id, bridge3.response_store)
+        self.assertTrue(bridge3.response_store[msg_id]["read"])
+        bridge3.cleanup_socket()
+
+    async def test_outbound_message_persists_across_restart(self):
+        bridge1 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        bridge1.response_store["out_persist_1"] = {
+            "direction": "outbound",
+            "status": "dispatched",
+            "content": "outbound message test",
+            "timestamp": time.time()
+        }
+        bridge1.cleanup_socket()
+
+        bridge2 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        self.assertIn("out_persist_1", bridge2.response_store)
+        self.assertEqual(bridge2.response_store["out_persist_1"]["content"], "outbound message test")
+        self.assertEqual(bridge2.get_unread_messages(), {})
+        bridge2.cleanup_socket()
+
+    async def test_session_isolation(self):
+        bridge_a = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "a.sock"),
+            session_name="session-a",
+            db_path=self.db_path
+        )
+        bridge_a.response_store["msg_a"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "message for A",
+            "timestamp": time.time()
+        }
+        bridge_a.cleanup_socket()
+
+        bridge_b = ClaudeMessagingProtocol(
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "b.sock"),
+            session_name="session-b",
+            db_path=self.db_path
+        )
+        self.assertNotIn("msg_a", bridge_b.response_store)
+        self.assertEqual(bridge_b.get_unread_messages(), {})
+        bridge_b.cleanup_socket()
+
+    async def test_rename_session_migrates_persisted_messages(self):
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="old-name",
+            db_path=self.db_path
+        )
+        bridge.response_store["renamed_msg"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "rename test",
+            "timestamp": time.time()
+        }
+        bridge.rename_session_in_store("old-name", "new-name")
+        bridge.cleanup_socket()
+
+        bridge_restarted = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="new-name",
+            db_path=self.db_path
+        )
+        self.assertIn("renamed_msg", bridge_restarted.response_store)
+        self.assertEqual(bridge_restarted.response_store["renamed_msg"]["content"], "rename test")
+        bridge_restarted.cleanup_socket()
+
+    async def test_pruning_keeps_unread_and_removes_old_read(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        old_time = time.time() - (40 * 86400)
+
+        store.save_message("old_unread", {
+            "direction": "inbound",
+            "read": False,
+            "content": "important unread",
+            "timestamp": old_time
+        }, session_name="prune-sess")
+
+        store.save_message("old_read", {
+            "direction": "inbound",
+            "read": True,
+            "content": "old already read",
+            "timestamp": old_time
+        }, session_name="prune-sess")
+
+        store.save_message("old_outbound", {
+            "direction": "outbound",
+            "content": "old sent",
+            "timestamp": old_time
+        }, session_name="prune-sess")
+
+        store.prune(max_age_days=30)
+        loaded = store.load_session_messages("prune-sess")
+        self.assertIn("old_unread", loaded)
+        self.assertNotIn("old_read", loaded)
+        self.assertNotIn("old_outbound", loaded)
+        store.close()
+
+    async def test_get_responses_pagination_via_mcp_server(self):
+        from claude_chatter.mcp_server import build_mcp_server
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        for i in range(1, 6):
+            bridge.response_store[f"msg_{i}"] = {
+                "direction": "inbound",
+                "content": f"msg {i}",
+                "timestamp": float(i)
+            }
+        server = build_mcp_server(bridge)
+        get_responses_tool = await server.get_tool("get_responses")
+        self.assertIsNotNone(get_responses_tool)
+        get_responses_fn = get_responses_tool.fn
+
+        single = json.loads(await get_responses_fn(msg_id="msg_3"))
+        self.assertEqual(single["content"], "msg 3")
+
+        all_res = json.loads(await get_responses_fn())
+        self.assertEqual(len(all_res), 5)
+
+        p1 = json.loads(await get_responses_fn(limit=2))
+        self.assertEqual(list(p1.keys()), ["msg_5", "msg_4"])
+
+        p2 = json.loads(await get_responses_fn(limit=2, offset=2))
+        self.assertEqual(list(p2.keys()), ["msg_3", "msg_2"])
+
+        bridge.cleanup_socket()
+
+    async def test_cli_inbox_and_history(self):
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        bridge.response_store["cli_in_1"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "cli test payload",
+            "timestamp": time.time()
+        }
+        bridge.cleanup_socket()
+
+        cmd_inbox = [
+            sys.executable, "-m", "claude_chatter.cli",
+            "--inbox", "--name", self.session_name, "--db", self.db_path
+        ]
+        res_inbox = subprocess.run(cmd_inbox, capture_output=True, text=True, check=True)
+        data_inbox = json.loads(res_inbox.stdout)
+        self.assertIn("cli_in_1", data_inbox)
+
+        cmd_hist = [
+            sys.executable, "-m", "claude_chatter.cli",
+            "--history", "--name", self.session_name, "--db", self.db_path
+        ]
+        res_hist = subprocess.run(cmd_hist, capture_output=True, text=True, check=True)
+        data_hist = json.loads(res_hist.stdout)
+        self.assertIn("cli_in_1", data_hist)
 
 
 class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
