@@ -207,11 +207,16 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     async def rename_session(new_name: str) -> str:
         """Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents. Persisted for this workspace, so future restarts keep the renamed identity instead of reverting to the cwd-derived default."""
         old_name = protocol.session_name
+        try:
+            protocol.rename_session_in_store(old_name, new_name)
+        except Exception as e:
+            logger.error(f"Failed to rename session in store: {e}")
+            raise ToolError(f"Failed to rename session in storage: {e}")
+
         protocol.cleanup_session_descriptor()
         protocol.session_name = new_name
         protocol.register_session_descriptor(session_name=new_name)
         protocol.persist_default_session_name(new_name)
-        protocol.rename_session_in_store(old_name, new_name)
         res = {
             "success": True,
             "previous_name": old_name,
@@ -233,6 +238,8 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     async def read_messages(mark_read: bool = True) -> str:
         """Returns {"messages": {...}} with unread inbound messages (oldest first) - the inbox check for this async mailbox. Waking a host on arrival is best effort (push, for primed Antigravity sessions only), so call this after a tools/list_changed notification, or at the start of a turn and before going idle, to see what's new. Marks returned messages as read unless mark_read is set to false (to peek without consuming). Adds a push_hint when this Antigravity session has not primed push yet."""
         result: Dict[str, Any] = {"messages": protocol.get_unread_messages(mark_read=mark_read)}
+        if protocol.persistence_error:
+            result["persistence_error"] = protocol.persistence_error
         if under_agy and not poker.primed:
             result["push_hint"] = (
                 "Push is not primed, so nothing can wake you when a message arrives. "
@@ -271,6 +278,8 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
             off = max(0, offset)
             lim = max(0, limit) if limit is not None else None
             resp = dict(sorted_items[off : (off + lim) if lim is not None else None])
+        if protocol.persistence_error:
+            resp["persistence_error"] = protocol.persistence_error
         return json.dumps(resp, indent=2)
 
     return mcp

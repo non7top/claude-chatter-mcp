@@ -89,14 +89,20 @@ def main():
         sys.exit(0)
 
     elif args.inbox:
-        target_name = args.name or ClaudeMessagingProtocol.read_persisted_session_name()
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name)
+        if not target_name:
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
         protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
         unread = protocol.get_unread_messages(mark_read=False)
         print(json.dumps(unread, indent=2))
         sys.exit(0)
 
     elif args.history:
-        target_name = args.name or ClaudeMessagingProtocol.read_persisted_session_name()
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name)
+        if not target_name:
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
         protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
         print(json.dumps(protocol.response_store, indent=2))
         sys.exit(0)

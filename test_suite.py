@@ -32,12 +32,19 @@ from claude_chatter.hook import decide as hook_decide
 class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp_dir.name, "test_session_mgmt.db")
+        self.prev_db = os.environ.get("CHATTER_DB_PATH")
+        os.environ["CHATTER_DB_PATH"] = self.db_path
         self.socket_path = os.path.join(self.tmp_dir.name, "test_session_mgmt.sock")
-        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path)
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path, db_path=self.db_path)
 
     async def asyncTearDown(self):
         self.bridge.cleanup_session_descriptor()
         self.bridge.cleanup_socket()
+        if self.prev_db is not None:
+            os.environ["CHATTER_DB_PATH"] = self.prev_db
+        else:
+            os.environ.pop("CHATTER_DB_PATH", None)
         self.tmp_dir.cleanup()
 
     async def test_session_descriptor_registration(self):
@@ -471,6 +478,51 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sess_b_msgs["dup"]["content"], "for B")
         store.close()
 
+    async def test_migration_from_single_pk_schema(self):
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    msg_id TEXT PRIMARY KEY,
+                    session_name TEXT NOT NULL,
+                    cwd_digest TEXT,
+                    direction TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
+                    sender TEXT,
+                    target_session TEXT,
+                    target_pid INTEGER,
+                    content TEXT,
+                    status TEXT,
+                    timestamp REAL NOT NULL,
+                    entry_json TEXT NOT NULL
+                )
+                """
+            )
+            entry = {"direction": "inbound", "read": False, "content": "migrated msg", "timestamp": 1.0}
+            conn.execute(
+                """
+                INSERT INTO messages VALUES (
+                    'old_msg_1', 'sess_old', 'digest1', 'inbound', 0,
+                    'peer', NULL, NULL, 'migrated msg', 'received', 1.0, ?
+                )
+                """,
+                (json.dumps(entry),)
+            )
+        conn.close()
+
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        msgs = store.load_session_messages("sess_old")
+        self.assertIn("old_msg_1", msgs)
+        self.assertEqual(msgs["old_msg_1"]["content"], "migrated msg")
+
+        store.save_message("new_msg_2", {"direction": "inbound", "read": False, "content": "after migration", "timestamp": 2.0}, "sess_old")
+        msgs_after = store.load_session_messages("sess_old")
+        self.assertIn("new_msg_2", msgs_after)
+        store.close()
+
     async def test_bare_cli_inbox_and_history_with_live_bridge(self):
         bridge = ClaudeMessagingProtocol(
             bridge_socket_path=self.sock_path,
@@ -534,16 +586,267 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
         data_hist = json.loads(res_hist.stdout)
         self.assertIn("cli_in_1", data_hist)
 
+    async def test_unwritable_db_directory_error_visibility(self):
+        from claude_chatter.storage import MessageStore
+        from claude_chatter.mcp_server import build_mcp_server
+        bad_dir = os.path.join(self.tmp_dir.name, "bad_dir")
+        os.makedirs(bad_dir, exist_ok=True)
+        os.chmod(bad_dir, 0o444)
+        bad_db = os.path.join(bad_dir, "messages.db")
+        try:
+            store = MessageStore(bad_db)
+            self.assertTrue(store.is_disabled())
+            self.assertIsNotNone(store.last_error)
+
+            bridge = ClaudeMessagingProtocol(
+                bridge_socket_path=self.sock_path,
+                session_name="disabled-store-sess",
+                db_path=bad_db
+            )
+            self.assertIsNotNone(bridge.persistence_error)
+            server = build_mcp_server(bridge)
+            read_fn = (await server.get_tool("read_messages")).fn
+            read_res = json.loads(await read_fn())
+            self.assertIn("persistence_error", read_res)
+
+            get_resp_fn = (await server.get_tool("get_responses")).fn
+            resp_res = json.loads(await get_resp_fn())
+            self.assertIn("persistence_error", resp_res)
+            bridge.cleanup_socket()
+        finally:
+            os.chmod(bad_dir, 0o777)
+
+    async def test_host_reload_waits_for_dying_process(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        fake_desc = os.path.join(sessions_dir, f"{proc.pid}.json")
+        desc_data = {
+            "name": "dying-reload-sess",
+            "pid": proc.pid,
+            "cwd": os.getcwd()
+        }
+        with open(fake_desc, "w", encoding="utf-8") as f:
+            json.dump(desc_data, f)
+
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            db_path=self.db_path
+        )
+        try:
+            in_use = bridge._session_name_in_use("dying-reload-sess", wait_if_same_cwd=True, max_wait=1.5, poll_interval=0.05)
+            self.assertFalse(in_use)
+        finally:
+            proc.wait()
+            if os.path.exists(fake_desc):
+                os.remove(fake_desc)
+            bridge.cleanup_socket()
+
+    async def test_bare_cli_inbox_with_no_persisted_name_creates_no_files(self):
+        empty_dir = os.path.join(self.tmp_dir.name, "empty_workspace")
+        os.makedirs(empty_dir, exist_ok=True)
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        files_before = set(os.listdir(names_dir)) if os.path.exists(names_dir) else set()
+
+        cmd = [sys.executable, "-m", "claude_chatter.cli", "--inbox", "--db", self.db_path]
+        res = subprocess.run(cmd, cwd=empty_dir, capture_output=True, text=True, check=True)
+        self.assertEqual(res.stdout.strip(), "{}")
+
+        files_after = set(os.listdir(names_dir)) if os.path.exists(names_dir) else set()
+        self.assertEqual(files_before, files_after)
+
+    async def test_bare_cli_inbox_with_env_named_bridge(self):
+        work_dir = os.path.join(self.tmp_dir.name, "env_workspace")
+        os.makedirs(work_dir, exist_ok=True)
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        fake_desc = os.path.join(sessions_dir, f"{os.getpid()}.json")
+        desc_data = {
+            "name": "env-named-sess",
+            "pid": os.getpid(),
+            "cwd": work_dir
+        }
+        with open(fake_desc, "w", encoding="utf-8") as f:
+            json.dump(desc_data, f)
+
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.save_message("m_env_1", {"direction": "inbound", "read": False, "content": "from env bridge", "timestamp": time.time()}, "env-named-sess")
+        store.close()
+
+        try:
+            cmd = [sys.executable, "-m", "claude_chatter.cli", "--inbox", "--db", self.db_path]
+            clean_env = os.environ.copy()
+            clean_env.pop("CHATTER_SESSION_NAME", None)
+            clean_env.pop("AGY_SESSION_NAME", None)
+            res = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, check=True, env=clean_env)
+            data = json.loads(res.stdout)
+            self.assertIn("m_env_1", data)
+            self.assertEqual(data["m_env_1"]["content"], "from env bridge")
+        finally:
+            if os.path.exists(fake_desc):
+                os.remove(fake_desc)
+
+    async def test_periodic_prune_on_save_message(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        old_time = time.time() - (40 * 86400)
+        store.save_message("old_prune_msg", {"direction": "inbound", "read": True, "content": "old", "timestamp": old_time}, "prune-sess")
+        store._last_prune_time = time.time() - 4000
+        store.save_message("new_save_msg", {"direction": "inbound", "read": False, "content": "new", "timestamp": time.time()}, "prune-sess")
+
+        msgs = store.load_session_messages("prune-sess")
+        self.assertNotIn("old_prune_msg", msgs)
+        self.assertIn("new_save_msg", msgs)
+        store.close()
+
+    async def test_rename_restart_history_and_unread_intact(self):
+        bridge1 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="sess-1",
+            db_path=self.db_path
+        )
+        now = time.time()
+        bridge1.response_store["in_1"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "unread inbound",
+            "timestamp": now
+        }
+        bridge1.response_store["out_1"] = {
+            "direction": "outbound",
+            "content": "dispatched outbound",
+            "timestamp": now + 1.0
+        }
+        bridge1.rename_session_in_store("sess-1", "sess-2")
+        bridge1.cleanup_socket()
+
+        bridge2 = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="sess-2",
+            db_path=self.db_path
+        )
+        self.assertIn("in_1", bridge2.response_store)
+        self.assertIn("out_1", bridge2.response_store)
+        unread = bridge2.get_unread_messages(mark_read=False)
+        self.assertIn("in_1", unread)
+        self.assertEqual(unread["in_1"]["content"], "unread inbound")
+        bridge2.cleanup_socket()
+
+    async def test_rename_twice(self):
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="name-a",
+            db_path=self.db_path
+        )
+        bridge.response_store["msg_a"] = {"direction": "inbound", "read": False, "content": "stage a", "timestamp": 1.0}
+        bridge.rename_session_in_store("name-a", "name-b")
+        bridge.response_store["msg_b"] = {"direction": "inbound", "read": False, "content": "stage b", "timestamp": 2.0}
+        bridge.rename_session_in_store("name-b", "name-c")
+        bridge.response_store["msg_c"] = {"direction": "inbound", "read": False, "content": "stage c", "timestamp": 3.0}
+
+        msgs_a = bridge.store.load_session_messages("name-a")
+        msgs_b = bridge.store.load_session_messages("name-b")
+        msgs_c = bridge.store.load_session_messages("name-c")
+
+        for msgs in (msgs_a, msgs_b, msgs_c):
+            self.assertEqual(set(msgs.keys()), {"msg_a", "msg_b", "msg_c"})
+        bridge.cleanup_socket()
+
+    async def test_query_by_old_and_new_name(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.save_message("m_alpha", {"direction": "inbound", "read": False, "content": "alpha msg", "timestamp": 1.0}, "sess-alpha")
+        store.rename_session("sess-alpha", "sess-beta")
+        store.save_message("m_beta", {"direction": "inbound", "read": False, "content": "beta msg", "timestamp": 2.0}, "sess-beta")
+
+        by_old = store.load_session_messages("sess-alpha")
+        by_new = store.load_session_messages("sess-beta")
+        self.assertEqual(set(by_old.keys()), {"m_alpha", "m_beta"})
+        self.assertEqual(set(by_new.keys()), {"m_alpha", "m_beta"})
+        store.close()
+
+    async def test_rename_onto_existing_name_with_duplicate_msg_id(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.save_message("dup_id", {"direction": "inbound", "read": False, "content": "from target", "timestamp": 1.0}, "target-sess")
+        store.save_message("target_unique", {"direction": "inbound", "read": False, "content": "target only", "timestamp": 2.0}, "target-sess")
+
+        store.save_message("dup_id", {"direction": "inbound", "read": False, "content": "from source", "timestamp": 3.0}, "source-sess")
+        store.save_message("source_unique", {"direction": "inbound", "read": False, "content": "source only", "timestamp": 4.0}, "source-sess")
+
+        store.rename_session("source-sess", "target-sess")
+        merged = store.load_session_messages("target-sess")
+        self.assertIn("dup_id", merged)
+        self.assertIn("target_unique", merged)
+        self.assertIn("source_unique", merged)
+        store.close()
+
+    async def test_rename_with_unread_messages_pending(self):
+        from claude_chatter.mcp_server import build_mcp_server
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="pending-sess",
+            db_path=self.db_path
+        )
+        bridge.response_store["pending_1"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "unread message payload",
+            "timestamp": 1.0
+        }
+        server = build_mcp_server(bridge)
+        rename_fn = (await server.get_tool("rename_session")).fn
+        res = json.loads(await rename_fn(new_name="renamed-pending-sess"))
+        self.assertTrue(res["success"])
+
+        read_fn = (await server.get_tool("read_messages")).fn
+        unread = json.loads(await read_fn(mark_read=False))["messages"]
+        self.assertIn("pending_1", unread)
+        self.assertEqual(unread["pending_1"]["content"], "unread message payload")
+        bridge.cleanup_session_descriptor()
+        bridge.cleanup_socket()
+
+    async def test_simulated_db_failure_during_rename_is_surfaced(self):
+        from unittest import mock
+        import sqlite3
+        from fastmcp.exceptions import ToolError
+        from claude_chatter.mcp_server import build_mcp_server
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="original-name",
+            db_path=self.db_path
+        )
+        bridge.register_session_descriptor(session_name="original-name")
+        server = build_mcp_server(bridge)
+        rename_fn = (await server.get_tool("rename_session")).fn
+
+        with mock.patch.object(bridge.store, "rename_session", side_effect=sqlite3.OperationalError("disk I/O error")):
+            with self.assertRaises(ToolError):
+                await rename_fn(new_name="failed-name")
+
+        self.assertEqual(bridge.session_name, "original-name")
+        self.assertEqual(bridge.response_store._session_name, "original-name")
+        bridge.cleanup_session_descriptor()
+        bridge.cleanup_socket()
+
 
 class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp_dir.name, "test_ipc.db")
+        self.prev_db = os.environ.get("CHATTER_DB_PATH")
+        os.environ["CHATTER_DB_PATH"] = self.db_path
         self.socket_path = os.path.join(self.tmp_dir.name, "test_ipc.sock")
-        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path)
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path, db_path=self.db_path)
 
     async def asyncTearDown(self):
         self.bridge.cleanup_session_descriptor()
         self.bridge.cleanup_socket()
+        if self.prev_db is not None:
+            os.environ["CHATTER_DB_PATH"] = self.prev_db
+        else:
+            os.environ.pop("CHATTER_DB_PATH", None)
         self.tmp_dir.cleanup()
 
     async def test_inbound_listener_and_buffering(self):
@@ -1174,7 +1477,9 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
                 return [FakeProc(n) for n in ancestor_names]
 
         protocol = ClaudeMessagingProtocol(
-            bridge_socket_path=os.path.join(self.tmp_dir.name, "hint.sock"), session_name="hint-test"
+            bridge_socket_path=os.path.join(self.tmp_dir.name, "hint.sock"),
+            session_name="hint-test",
+            db_path=os.path.join(self.tmp_dir.name, "hint.db")
         )
         with mock.patch.object(mcp_server.psutil, "Process", return_value=FakeSelf()):
             server = mcp_server.build_mcp_server(protocol)
