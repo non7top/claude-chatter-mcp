@@ -34,7 +34,8 @@ class ClaudeMessagingProtocol:
         bridge_socket_path: Optional[str] = None,
         session_name: Optional[str] = None,
         on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-        db_path: Optional[str] = None
+        db_path: Optional[str] = None,
+        enable_storage: bool = True
     ):
         """
         on_inbound_message(method, params), if given, is invoked whenever a real
@@ -58,19 +59,25 @@ class ClaudeMessagingProtocol:
         else:
             self.bridge_socket_path = self._get_default_socket_path(self.pid, self.session_name)
 
-        self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
-        self.store = MessageStore(self.db_path)
-        self.store.prune()
-        initial_messages = self.store.load_session_messages(self.session_name)
-        self.response_store = ResponseStore(
-            store=self.store,
-            session_name=self.session_name,
-            cwd_digest=self._cwd_digest(),
-            initial=initial_messages
-        )
+        if enable_storage:
+            self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
+            self.store = MessageStore(self.db_path)
+            self.store.prune()
+            initial_messages = self.store.load_session_messages(self.session_name)
+            self.response_store = ResponseStore(
+                store=self.store,
+                session_name=self.session_name,
+                cwd_digest=self._cwd_digest(),
+                initial=initial_messages
+            )
+        else:
+            self.db_path = None
+            self.store = None
+            self.response_store = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
-    def _project_path(self) -> str:
+    @staticmethod
+    def _find_project_path() -> str:
         # A plugin-launched server runs in the plugin's install directory, so
         # the agy process above it is the only place the project path lives.
         try:
@@ -80,6 +87,20 @@ class ClaudeMessagingProtocol:
         except psutil.Error:
             pass
         return os.getcwd()
+
+    @staticmethod
+    def read_persisted_session_name(project_path: Optional[str] = None) -> str:
+        path = project_path or ClaudeMessagingProtocol._find_project_path()
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+        name_path = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names", f"{digest}.name")
+        try:
+            with open(name_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _project_path(self) -> str:
+        return self._find_project_path()
 
     def _cwd_digest(self) -> str:
         return hashlib.sha1(self._project_path().encode("utf-8")).hexdigest()[:8]
@@ -625,14 +646,14 @@ class ClaudeMessagingProtocol:
             for msg_id, entry in unread.items():
                 entry["read"] = True
                 to_mark.append(msg_id)
-            if to_mark and hasattr(self.response_store, "mark_read"):
+            if to_mark and isinstance(self.response_store, ResponseStore):
                 self.response_store.mark_read(to_mark)
         return unread
 
     def rename_session_in_store(self, old_name: str, new_name: str):
-        if hasattr(self, "store") and self.store:
+        if self.store:
             self.store.rename_session(old_name, new_name)
-        if hasattr(self, "response_store") and hasattr(self.response_store, "set_session_name"):
+        if isinstance(self.response_store, ResponseStore):
             self.response_store.set_session_name(new_name)
 
     async def start_bridge_listener(self):
@@ -662,7 +683,7 @@ class ClaudeMessagingProtocol:
             logger.error(f"Bridge listener server error: {e}")
 
     def cleanup_socket(self):
-        if hasattr(self, "store") and self.store:
+        if self.store:
             self.store.close()
         if os.path.exists(self.bridge_socket_path):
             try:

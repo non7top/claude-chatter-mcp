@@ -153,7 +153,7 @@ Returns unread inbound messages (oldest first), keyed by message ID, and marks t
   * `mark_read` (boolean, optional, default true): set false to peek without consuming.
 
 ### 5. `get_responses`
-Queries inbound and outbound message history persisted across bridge restarts.
+Queries inbound and outbound message history persisted across bridge restarts (newest first).
 * **Arguments**:
   * `msg_id` (string, optional): Specific message ID filter.
   * `limit` (integer, optional): Maximum number of messages to return (newest first).
@@ -222,7 +222,7 @@ Execute single-shot operations directly from terminal:
 
 **Files the bridge reads or writes** (all under `~/.claude/`):
 * `sessions/` - Claude Code's session descriptors and `.key` files; the bridge reads them and writes its own descriptor and key.
-* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600.
+* `chatter-messages.db` - SQLite database storing inbound and outbound messages, tracking read/unread status across bridge restarts. Mode 0600. Read and outbound messages are kept for 30 days (capped at 1,000 per session); unread inbound messages are preserved up to 90 days.
 * `logs/claude-chatter.log` - shared by all bridge processes (also written to stderr); rotates at 5 MiB, 3 backups.
 * `chatter-session-names/` - the generated or renamed session name per project path.
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).

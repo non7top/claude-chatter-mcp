@@ -14,7 +14,7 @@ logger = logging.getLogger("SocketBridgeMCP")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
-    msg_id TEXT PRIMARY KEY,
+    msg_id TEXT NOT NULL,
     session_name TEXT NOT NULL,
     cwd_digest TEXT,
     direction TEXT NOT NULL,
@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT,
     status TEXT,
     timestamp REAL NOT NULL,
-    entry_json TEXT NOT NULL
+    entry_json TEXT NOT NULL,
+    PRIMARY KEY (session_name, msg_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_name, direction, read);
-CREATE INDEX IF NOT EXISTS idx_messages_cwd ON messages (cwd_digest, direction, read);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp);
 """
 
@@ -106,8 +106,7 @@ class MessageStore:
                         sender, target_session, target_pid, content, status,
                         timestamp, entry_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(msg_id) DO UPDATE SET
-                        session_name = excluded.session_name,
+                    ON CONFLICT(session_name, msg_id) DO UPDATE SET
                         cwd_digest = excluded.cwd_digest,
                         direction = excluded.direction,
                         read = excluded.read,
@@ -126,16 +125,19 @@ class MessageStore:
                     )
                 )
         except Exception as e:
-            logger.error(f"Failed to persist message {msg_id}: {e}")
+            logger.error(f"Failed to persist message {msg_id} for {session_name}: {e}")
 
-    def mark_read(self, msg_ids: List[str]):
+    def mark_read(self, session_name: str, msg_ids: List[str]):
         if self._disabled or not msg_ids:
             return
         try:
             conn = self._get_connection()
             with conn:
                 for msg_id in msg_ids:
-                    cur = conn.execute("SELECT entry_json FROM messages WHERE msg_id = ?", (msg_id,))
+                    cur = conn.execute(
+                        "SELECT entry_json FROM messages WHERE session_name = ? AND msg_id = ?",
+                        (session_name, msg_id)
+                    )
                     row = cur.fetchone()
                     if row:
                         try:
@@ -145,18 +147,18 @@ class MessageStore:
                         except Exception:
                             new_json = row["entry_json"]
                         conn.execute(
-                            "UPDATE messages SET read = 1, entry_json = ? WHERE msg_id = ?",
-                            (new_json, msg_id)
+                            "UPDATE messages SET read = 1, entry_json = ? WHERE session_name = ? AND msg_id = ?",
+                            (new_json, session_name, msg_id)
                         )
                     else:
-                        conn.execute("UPDATE messages SET read = 1 WHERE msg_id = ?", (msg_id,))
+                        conn.execute(
+                            "UPDATE messages SET read = 1 WHERE session_name = ? AND msg_id = ?",
+                            (session_name, msg_id)
+                        )
         except Exception as e:
-            logger.error(f"Failed to mark messages read: {e}")
+            logger.error(f"Failed to mark messages read for {session_name}: {e}")
 
-    def load_session_messages(
-        self,
-        session_name: str
-    ) -> Dict[str, Dict[str, Any]]:
+    def load_session_messages(self, session_name: str) -> Dict[str, Dict[str, Any]]:
         if self._disabled:
             return {}
         messages: Dict[str, Dict[str, Any]] = {}
@@ -196,15 +198,18 @@ class MessageStore:
         except Exception as e:
             logger.error(f"Failed to update session name in message store: {e}")
 
-    def delete_message(self, msg_id: str):
+    def delete_message(self, session_name: str, msg_id: str):
         if self._disabled:
             return
         try:
             conn = self._get_connection()
             with conn:
-                conn.execute("DELETE FROM messages WHERE msg_id = ?", (msg_id,))
+                conn.execute(
+                    "DELETE FROM messages WHERE session_name = ? AND msg_id = ?",
+                    (session_name, msg_id)
+                )
         except Exception as e:
-            logger.error(f"Failed to delete message {msg_id}: {e}")
+            logger.error(f"Failed to delete message {msg_id} for {session_name}: {e}")
 
     def clear_session_messages(self, session_name: str):
         if self._disabled:
@@ -216,14 +221,19 @@ class MessageStore:
         except Exception as e:
             logger.error(f"Failed to clear session messages for {session_name}: {e}")
 
-    def prune(self, max_age_days: int = 30, max_messages_per_session: int = 1000):
+    def prune(
+        self,
+        max_age_days: int = 30,
+        max_messages_per_session: int = 1000,
+        max_unread_age_days: int = 90
+    ):
         if self._disabled:
             return
         try:
             conn = self._get_connection()
             cutoff = time.time() - (max_age_days * 86400)
+            unread_cutoff = time.time() - (max_unread_age_days * 86400)
             with conn:
-                # Unread inbound messages are never pruned.
                 conn.execute(
                     """
                     DELETE FROM messages
@@ -231,6 +241,15 @@ class MessageStore:
                       AND timestamp < ?
                     """,
                     (cutoff,)
+                )
+                conn.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE read = 0
+                      AND direction = 'inbound'
+                      AND timestamp < ?
+                    """,
+                    (unread_cutoff,)
                 )
                 cur = conn.execute("SELECT DISTINCT session_name FROM messages")
                 sessions = [r[0] for r in cur.fetchall()]
@@ -291,7 +310,7 @@ class ResponseStore(dict):
     def __delitem__(self, key: str):
         super().__delitem__(key)
         if self._store:
-            self._store.delete_message(key)
+            self._store.delete_message(self._session_name, key)
 
     def clear(self):
         super().clear()
@@ -303,4 +322,4 @@ class ResponseStore(dict):
             if mid in self and isinstance(self[mid], dict):
                 self[mid]["read"] = True
         if self._store:
-            self._store.mark_read(msg_ids)
+            self._store.mark_read(self._session_name, msg_ids)

@@ -70,7 +70,7 @@ def main():
         sys.exit(0 if result.get("ok") else 1)
 
     elif args.list:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
 
         async def _cmd_list():
             peers = await protocol.verify_and_purge_sessions()
@@ -80,7 +80,7 @@ def main():
 
     elif args.jobs:
         from .jobs import list_jobs
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
 
         async def _cmd_jobs():
             peers = await protocol.verify_and_purge_sessions()
@@ -89,18 +89,20 @@ def main():
         sys.exit(0)
 
     elif args.inbox:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        target_name = args.name or ClaudeMessagingProtocol.read_persisted_session_name()
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
         unread = protocol.get_unread_messages(mark_read=False)
         print(json.dumps(unread, indent=2))
         sys.exit(0)
 
     elif args.history:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        target_name = args.name or ClaudeMessagingProtocol.read_persisted_session_name()
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
         print(json.dumps(protocol.response_store, indent=2))
         sys.exit(0)
 
     elif args.purge:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
 
         async def _cmd_purge():
             peers = await protocol.verify_and_purge_sessions()
@@ -109,7 +111,7 @@ def main():
         sys.exit(0)
 
     elif args.send:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
         target_session, message_text = args.send[0], args.send[1]
 
         async def _cmd_send():

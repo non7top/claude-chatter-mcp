@@ -259,20 +259,18 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         limit: Optional[int] = None,
         offset: int = 0
     ) -> str:
-        """Fetches inbound and outbound message history persisted across bridge restarts. Supports pagination via limit and offset (newest first). Use read_messages instead to check for new inbound messages specifically."""
+        """Fetches inbound and outbound message history persisted across bridge restarts (newest first). Supports pagination via limit and offset. Use read_messages instead to check for new inbound messages specifically."""
         if msg_id:
             resp = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."})
-        elif limit is not None or offset > 0:
-            off = max(0, offset)
-            lim = max(0, limit) if limit is not None else None
+        else:
             sorted_items = sorted(
                 protocol.response_store.items(),
                 key=lambda kv: kv[1].get("timestamp", 0),
                 reverse=True
             )
+            off = max(0, offset)
+            lim = max(0, limit) if limit is not None else None
             resp = dict(sorted_items[off : (off + lim) if lim is not None else None])
-        else:
-            resp = protocol.response_store
         return json.dumps(resp, indent=2)
 
     return mcp

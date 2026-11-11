@@ -12,8 +12,14 @@ import uuid
 import hashlib
 import asyncio
 import tempfile
+import atexit
 import unittest
 import subprocess
+
+# Isolate host-native test runs from real ~/.claude/chatter-messages.db
+_suite_tmp_db_dir = tempfile.TemporaryDirectory()
+os.environ.setdefault("CHATTER_DB_PATH", os.path.join(_suite_tmp_db_dir.name, "test_suite_default.db"))
+atexit.register(_suite_tmp_db_dir.cleanup)
 
 # Ensure repo directory is in path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -441,6 +447,7 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
 
         all_res = json.loads(await get_responses_fn())
         self.assertEqual(len(all_res), 5)
+        self.assertEqual(list(all_res.keys()), ["msg_5", "msg_4", "msg_3", "msg_2", "msg_1"])
 
         p1 = json.loads(await get_responses_fn(limit=2))
         self.assertEqual(list(p1.keys()), ["msg_5", "msg_4"])
@@ -449,6 +456,53 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(p2.keys()), ["msg_3", "msg_2"])
 
         bridge.cleanup_socket()
+
+    async def test_duplicate_msg_id_across_sessions_does_not_overwrite(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.save_message("dup", {"direction": "inbound", "read": False, "content": "for A", "timestamp": 1.0}, "sess-a")
+        store.save_message("dup", {"direction": "inbound", "read": False, "content": "for B", "timestamp": 2.0}, "sess-b")
+
+        sess_a_msgs = store.load_session_messages("sess-a")
+        sess_b_msgs = store.load_session_messages("sess-b")
+        self.assertIn("dup", sess_a_msgs)
+        self.assertEqual(sess_a_msgs["dup"]["content"], "for A")
+        self.assertIn("dup", sess_b_msgs)
+        self.assertEqual(sess_b_msgs["dup"]["content"], "for B")
+        store.close()
+
+    async def test_bare_cli_inbox_and_history_with_live_bridge(self):
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            db_path=self.db_path
+        )
+        bridge.register_session_descriptor(session_name=bridge.session_name)
+        bridge.response_store["m1"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "live bridge msg",
+            "timestamp": time.time()
+        }
+        try:
+            cmd_inbox = [
+                sys.executable, "-m", "claude_chatter.cli",
+                "--inbox", "--db", self.db_path
+            ]
+            res_inbox = subprocess.run(cmd_inbox, capture_output=True, text=True, check=True)
+            data_inbox = json.loads(res_inbox.stdout)
+            self.assertIn("m1", data_inbox)
+            self.assertEqual(data_inbox["m1"]["content"], "live bridge msg")
+
+            cmd_hist = [
+                sys.executable, "-m", "claude_chatter.cli",
+                "--history", "--db", self.db_path
+            ]
+            res_hist = subprocess.run(cmd_hist, capture_output=True, text=True, check=True)
+            data_hist = json.loads(res_hist.stdout)
+            self.assertIn("m1", data_hist)
+        finally:
+            bridge.cleanup_session_descriptor()
+            bridge.cleanup_socket()
 
     async def test_cli_inbox_and_history(self):
         bridge = ClaudeMessagingProtocol(
