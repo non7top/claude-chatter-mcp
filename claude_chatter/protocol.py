@@ -73,6 +73,8 @@ class ClaudeMessagingProtocol:
                 self.store.prune()
             if session_id:
                 self.session_id = session_id
+            elif getattr(self, "_is_clashing", False):
+                self.session_id = str(uuid.uuid4())
             else:
                 existing_id = self.store.resolve_session_id(self.session_name)
                 if existing_id:
@@ -99,7 +101,14 @@ class ClaudeMessagingProtocol:
         else:
             self.db_path = None
             self.store = None
-            self.session_id = session_id or (self._derive_session_id() if not session_name else str(uuid.uuid4()))
+            if session_id:
+                self.session_id = session_id
+            elif getattr(self, "_is_clashing", False):
+                self.session_id = str(uuid.uuid4())
+            elif not session_name:
+                self.session_id = self._derive_session_id()
+            else:
+                self.session_id = str(uuid.uuid4())
             if not self.read_only and self.as_bridge and not getattr(self, "_is_clashing", False) and not session_name and not env_name:
                 self.persist_default_session_name(self.session_name)
                 self.persist_session_id(self.session_id)

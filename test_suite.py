@@ -892,6 +892,142 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
             if os.path.exists(desc2_path):
                 os.remove(desc2_path)
 
+    async def test_concurrent_bridges_in_same_workspace_keep_separate_identities_and_inboxes(self):
+        workspace = tempfile.mkdtemp(prefix="concurrent_ws_")
+        old_cwd = os.getcwd()
+        os.chdir(workspace)
+        holder_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)"])
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        holder_desc = os.path.join(sessions_dir, f"{holder_proc.pid}.json")
+
+        digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
+        first_name = "holder-ws-app"
+        with open(holder_desc, "w", encoding="utf-8") as f:
+            json.dump({
+                "pid": holder_proc.pid,
+                "name": first_name,
+                "cwd": workspace,
+                "projectPath": workspace,
+                "cwdDigest": digest
+            }, f)
+
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        os.makedirs(names_dir, exist_ok=True)
+        with open(os.path.join(names_dir, f"{digest}.name"), "w", encoding="utf-8") as f:
+            f.write(first_name)
+        first_id = str(uuid.uuid4())
+        with open(os.path.join(names_dir, f"{digest}.id"), "w", encoding="utf-8") as f:
+            f.write(first_id)
+
+        from claude_chatter.storage import MessageStore
+        init_store = MessageStore(self.db_path)
+        init_store.ensure_session(first_name, cwd_digest=digest, session_id=first_id)
+        init_store.save_message(
+            "m_first_1",
+            {"direction": "inbound", "read": False, "content": "from first session", "timestamp": time.time()},
+            first_name,
+            cwd_digest=digest,
+            session_id=first_id
+        )
+        init_store.close()
+
+        sock2 = os.path.join(self.tmp_dir.name, "b2.sock")
+        try:
+            b2 = ClaudeMessagingProtocol(bridge_socket_path=sock2, db_path=self.db_path, as_bridge=True)
+            self.assertTrue(getattr(b2, "_is_clashing", False))
+            self.assertNotEqual(b2.session_name, first_name)
+            self.assertNotEqual(b2.session_id, first_id)
+            self.assertNotIn("m_first_1", b2.response_store)
+
+            check_store = MessageStore(self.db_path, read_only=True)
+            with check_store._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT session_id, current_name FROM sessions WHERE session_id = ?", (first_id,))
+                row1 = cur.fetchone()
+                self.assertIsNotNone(row1)
+                self.assertEqual(row1["current_name"], first_name)
+
+                cur.execute("SELECT session_id, current_name FROM sessions WHERE session_id = ?", (b2.session_id,))
+                row2 = cur.fetchone()
+                self.assertIsNotNone(row2)
+                self.assertEqual(row2["current_name"], b2.session_name)
+            check_store.close()
+            b2.cleanup_socket()
+        finally:
+            holder_proc.kill()
+            holder_proc.wait()
+            os.chdir(old_cwd)
+            if os.path.exists(holder_desc):
+                os.remove(holder_desc)
+            name_file = os.path.join(names_dir, f"{digest}.name")
+            id_file = os.path.join(names_dir, f"{digest}.id")
+            if os.path.exists(name_file):
+                os.remove(name_file)
+            if os.path.exists(id_file):
+                os.remove(id_file)
+
+    async def test_host_reload_inherits_identity_and_unread_messages(self):
+        workspace = tempfile.mkdtemp(prefix="reload_ws_")
+        old_cwd = os.getcwd()
+        os.chdir(workspace)
+        dying_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        dying_desc = os.path.join(sessions_dir, f"{dying_proc.pid}.json")
+
+        digest = hashlib.sha1(workspace.encode("utf-8")).hexdigest()[:8]
+        reload_name = "reload-app"
+        with open(dying_desc, "w", encoding="utf-8") as f:
+            json.dump({
+                "pid": dying_proc.pid,
+                "name": reload_name,
+                "cwd": workspace,
+                "projectPath": workspace,
+                "cwdDigest": digest
+            }, f)
+
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        os.makedirs(names_dir, exist_ok=True)
+        with open(os.path.join(names_dir, f"{digest}.name"), "w", encoding="utf-8") as f:
+            f.write(reload_name)
+        reload_id = str(uuid.uuid4())
+        with open(os.path.join(names_dir, f"{digest}.id"), "w", encoding="utf-8") as f:
+            f.write(reload_id)
+
+        from claude_chatter.storage import MessageStore
+        init_store = MessageStore(self.db_path)
+        init_store.ensure_session(reload_name, cwd_digest=digest, session_id=reload_id)
+        init_store.save_message(
+            "m_reload_1",
+            {"direction": "inbound", "read": False, "content": "persisted unread msg", "timestamp": time.time()},
+            reload_name,
+            cwd_digest=digest,
+            session_id=reload_id
+        )
+        init_store.close()
+
+        sock_reload = os.path.join(self.tmp_dir.name, "reload.sock")
+        try:
+            b_reload = ClaudeMessagingProtocol(bridge_socket_path=sock_reload, db_path=self.db_path, as_bridge=True)
+            self.assertFalse(getattr(b_reload, "_is_clashing", False))
+            self.assertEqual(b_reload.session_name, reload_name)
+            self.assertEqual(b_reload.session_id, reload_id)
+            self.assertIn("m_reload_1", b_reload.response_store)
+            self.assertEqual(b_reload.response_store["m_reload_1"]["content"], "persisted unread msg")
+            b_reload.cleanup_socket()
+        finally:
+            dying_proc.wait()
+            os.chdir(old_cwd)
+            if os.path.exists(dying_desc):
+                os.remove(dying_desc)
+            name_file = os.path.join(names_dir, f"{digest}.name")
+            id_file = os.path.join(names_dir, f"{digest}.id")
+            if os.path.exists(name_file):
+                os.remove(name_file)
+            if os.path.exists(id_file):
+                os.remove(id_file)
+
     async def test_periodic_prune_on_save_message(self):
         from claude_chatter.storage import MessageStore
         store = MessageStore(self.db_path)
