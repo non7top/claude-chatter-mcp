@@ -205,8 +205,20 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 
     @mcp.tool()
     async def rename_session(new_name: str) -> str:
-        """Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents. Persisted for this workspace, so future restarts keep the renamed identity instead of reverting to the cwd-derived default."""
+        """Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents. Persisted for this workspace, so future restarts keep the renamed identity instead of reverting to the cwd-derived default. Note: if renaming onto a session name with existing message history in storage, duplicate msg_ids retain the renamed session's copy. Rejects renaming if the target name is currently held by an active session."""
         old_name = protocol.session_name
+        if old_name == new_name:
+            return json.dumps({
+                "success": True,
+                "previous_name": old_name,
+                "new_name": new_name,
+                "pid": getattr(protocol, "registered_pid", os.getpid()),
+                "descriptor_file": getattr(protocol, "session_json_path", "")
+            }, indent=2)
+
+        if protocol._session_name_in_use(new_name):
+            raise ToolError(f"Cannot rename: session name '{new_name}' is currently in use by an active session.")
+
         try:
             protocol.rename_session_in_store(old_name, new_name)
         except Exception as e:
@@ -268,7 +280,8 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     ) -> str:
         """Fetches inbound and outbound message history persisted across bridge restarts (newest first). Supports pagination via limit and offset. Use read_messages instead to check for new inbound messages specifically."""
         if msg_id:
-            resp = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."})
+            raw_entry = protocol.response_store.get(msg_id, {"error": f"Message ID '{msg_id}' not found."})
+            resp = dict(raw_entry)
         else:
             sorted_items = sorted(
                 protocol.response_store.items(),

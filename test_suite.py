@@ -658,21 +658,19 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
     async def test_bare_cli_inbox_with_env_named_bridge(self):
         work_dir = os.path.join(self.tmp_dir.name, "env_workspace")
         os.makedirs(work_dir, exist_ok=True)
-        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
-        os.makedirs(sessions_dir, exist_ok=True)
-        fake_desc = os.path.join(sessions_dir, f"{os.getpid()}.json")
-        desc_data = {
-            "name": "env-named-sess",
-            "pid": os.getpid(),
-            "cwd": work_dir
-        }
-        with open(fake_desc, "w", encoding="utf-8") as f:
-            json.dump(desc_data, f)
+        work_digest = hashlib.sha1(work_dir.encode("utf-8")).hexdigest()[:8]
 
         from claude_chatter.storage import MessageStore
         store = MessageStore(self.db_path)
-        store.save_message("m_env_1", {"direction": "inbound", "read": False, "content": "from env bridge", "timestamp": time.time()}, "env-named-sess")
+        store.ensure_session("env-named-sess", cwd_digest=work_digest)
+        store.save_message("m_env_1", {"direction": "inbound", "read": False, "content": "from env bridge", "timestamp": time.time()}, "env-named-sess", cwd_digest=work_digest)
         store.close()
+
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        os.makedirs(names_dir, exist_ok=True)
+        name_file = os.path.join(names_dir, f"{work_digest}.name")
+        with open(name_file, "w", encoding="utf-8") as f:
+            f.write("env-named-sess")
 
         try:
             cmd = [sys.executable, "-m", "claude_chatter.cli", "--inbox", "--db", self.db_path]
@@ -683,9 +681,16 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
             data = json.loads(res.stdout)
             self.assertIn("m_env_1", data)
             self.assertEqual(data["m_env_1"]["content"], "from env bridge")
+
+            # When .name file is deleted, it resolves via SQLite sessions table's cwd_digest
+            os.remove(name_file)
+            res_db = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, check=True, env=clean_env)
+            data_db = json.loads(res_db.stdout)
+            self.assertIn("m_env_1", data_db)
+            self.assertEqual(data_db["m_env_1"]["content"], "from env bridge")
         finally:
-            if os.path.exists(fake_desc):
-                os.remove(fake_desc)
+            if os.path.exists(name_file):
+                os.remove(name_file)
 
     async def test_periodic_prune_on_save_message(self):
         from claude_chatter.storage import MessageStore
@@ -829,6 +834,292 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.response_store._session_name, "original-name")
         bridge.cleanup_session_descriptor()
         bridge.cleanup_socket()
+
+    async def test_resolve_session_name_ignores_interactive_descriptors_and_resolves_via_file_or_db(self):
+        work_dir = os.path.join(self.tmp_dir.name, "resolve_test_dir")
+        os.makedirs(work_dir, exist_ok=True)
+        work_digest = hashlib.sha1(work_dir.encode("utf-8")).hexdigest()[:8]
+
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        fake_interactive = os.path.join(sessions_dir, f"{os.getpid()}_interactive.json")
+        desc = {
+            "name": "interactive-claude-session",
+            "pid": os.getpid(),
+            "kind": "interactive",
+            "cwd": work_dir
+        }
+        with open(fake_interactive, "w", encoding="utf-8") as f:
+            json.dump(desc, f)
+
+        try:
+            resolved = ClaudeMessagingProtocol.resolve_session_name(project_path=work_dir, db_path=self.db_path)
+            self.assertEqual(resolved, "")
+
+            names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+            os.makedirs(names_dir, exist_ok=True)
+            name_file = os.path.join(names_dir, f"{work_digest}.name")
+            with open(name_file, "w", encoding="utf-8") as f:
+                f.write("resolved-from-file")
+
+            resolved = ClaudeMessagingProtocol.resolve_session_name(project_path=work_dir, db_path=self.db_path)
+            self.assertEqual(resolved, "resolved-from-file")
+
+            os.remove(name_file)
+            from claude_chatter.storage import MessageStore
+            store = MessageStore(self.db_path)
+            store.ensure_session("resolved-from-db", cwd_digest=work_digest)
+            store.close()
+
+            resolved = ClaudeMessagingProtocol.resolve_session_name(project_path=work_dir, db_path=self.db_path)
+            self.assertEqual(resolved, "resolved-from-db")
+        finally:
+            if os.path.exists(fake_interactive):
+                os.remove(fake_interactive)
+            name_file = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names", f"{work_digest}.name")
+            if os.path.exists(name_file):
+                os.remove(name_file)
+
+    async def test_alias_reuse_does_not_adopt_stranger_history(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        sid_1 = store.ensure_session("work", cwd_digest="digest_1")
+        store.save_message("msg_work_1", {
+            "direction": "inbound",
+            "read": False,
+            "content": "confidential message",
+            "timestamp": time.time()
+        }, "work", cwd_digest="digest_1", session_id=sid_1)
+
+        store.rename_session("work", "work2", session_id=sid_1)
+        self.assertIn("msg_work_1", store.load_session_messages("work2"))
+
+        sid_2 = store.ensure_session("work", cwd_digest="digest_2")
+        self.assertNotEqual(sid_1, sid_2)
+
+        new_msgs = store.load_session_messages(sid_2)
+        self.assertEqual(new_msgs, {})
+
+        work_msgs = store.load_session_messages("work")
+        self.assertEqual(work_msgs, {})
+
+        work2_msgs = store.load_session_messages("work2")
+        self.assertIn("msg_work_1", work2_msgs)
+        store.close()
+
+    async def test_atomic_migration_rollback_on_failure(self):
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    msg_id TEXT PRIMARY KEY,
+                    session_name TEXT NOT NULL,
+                    cwd_digest TEXT,
+                    direction TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
+                    sender TEXT,
+                    target_session TEXT,
+                    target_pid INTEGER,
+                    content TEXT,
+                    status TEXT,
+                    timestamp REAL NOT NULL,
+                    entry_json TEXT NOT NULL
+                )
+                """
+            )
+            entry = {"direction": "inbound", "read": False, "content": "v1 msg", "timestamp": 1.0}
+            conn.execute(
+                """
+                INSERT INTO messages VALUES (
+                    'm1', 'sess1', 'dig1', 'inbound', 0,
+                    'peer', NULL, NULL, 'v1 msg', 'received', 1.0, ?
+                )
+                """,
+                (json.dumps(entry),)
+            )
+        conn.close()
+
+        from unittest import mock
+        from claude_chatter.storage import MessageStore, SCHEMA_STATEMENTS
+
+        with mock.patch("claude_chatter.storage.SCHEMA_STATEMENTS", [
+            SCHEMA_STATEMENTS[0],
+            SCHEMA_STATEMENTS[1],
+            "CREATE TABLE messages (invalid syntax...)",
+        ]):
+            store = MessageStore(self.db_path)
+            self.assertTrue(store.is_disabled())
+            self.assertIn("syntax error", store.last_error.lower())
+
+        raw_conn = sqlite3.connect(self.db_path)
+        tables = [r[0] for r in raw_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        self.assertIn("messages", tables)
+        self.assertNotIn("messages_old", tables)
+        raw_conn.close()
+
+    async def test_interrupted_migration_startup_recovery(self):
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.execute(
+                """
+                CREATE TABLE messages_old (
+                    msg_id TEXT PRIMARY KEY,
+                    session_name TEXT NOT NULL,
+                    cwd_digest TEXT,
+                    direction TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
+                    sender TEXT,
+                    target_session TEXT,
+                    target_pid INTEGER,
+                    content TEXT,
+                    status TEXT,
+                    timestamp REAL NOT NULL,
+                    entry_json TEXT NOT NULL
+                )
+                """
+            )
+            entry = {"direction": "inbound", "read": False, "content": "stranded data", "timestamp": 1.0}
+            conn.execute(
+                """
+                INSERT INTO messages_old VALUES (
+                    'm_stranded_1', 'stranded_sess', 'dig_str', 'inbound', 0,
+                    'peer', NULL, NULL, 'stranded data', 'received', 1.0, ?
+                )
+                """,
+                (json.dumps(entry),)
+            )
+        conn.close()
+
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        self.assertFalse(store.is_disabled())
+        msgs = store.load_session_messages("stranded_sess")
+        self.assertIn("m_stranded_1", msgs)
+        self.assertEqual(msgs["m_stranded_1"]["content"], "stranded data")
+
+        raw_conn = sqlite3.connect(self.db_path)
+        tables = [r[0] for r in raw_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        self.assertNotIn("messages_old", tables)
+        raw_conn.close()
+        store.close()
+
+    async def test_host_reload_waits_for_plugin_bridge_matching_project_path_or_cwd_digest(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        fake_desc = os.path.join(sessions_dir, f"{proc.pid}.json")
+
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            db_path=self.db_path
+        )
+        desc_data = {
+            "name": "dying-plugin-sess",
+            "pid": proc.pid,
+            "cwd": "/some/plugin/install/dir",
+            "projectPath": bridge._project_path(),
+            "cwdDigest": bridge._cwd_digest()
+        }
+        with open(fake_desc, "w", encoding="utf-8") as f:
+            json.dump(desc_data, f)
+
+        try:
+            in_use = bridge._session_name_in_use("dying-plugin-sess", wait_if_same_cwd=True, max_wait=1.5, poll_interval=0.05)
+            self.assertFalse(in_use)
+        finally:
+            proc.wait()
+            if os.path.exists(fake_desc):
+                os.remove(fake_desc)
+            bridge.cleanup_socket()
+
+    async def test_get_responses_with_persistence_error_does_not_mutate_in_memory_store(self):
+        from claude_chatter.mcp_server import build_mcp_server
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name=self.session_name,
+            db_path=self.db_path
+        )
+        bridge.response_store["target_msg"] = {
+            "direction": "inbound",
+            "read": False,
+            "content": "test payload",
+            "timestamp": time.time()
+        }
+        bridge.store._disabled = True
+        bridge.store.last_error = "disk failure simulated"
+
+        server = build_mcp_server(bridge)
+        get_resp_fn = (await server.get_tool("get_responses")).fn
+        res = json.loads(await get_resp_fn(msg_id="target_msg"))
+        self.assertIn("persistence_error", res)
+        self.assertEqual(res["persistence_error"], "disk failure simulated")
+
+        self.assertNotIn("persistence_error", bridge.response_store["target_msg"])
+        bridge.cleanup_socket()
+
+    async def test_rename_session_rejected_when_name_in_use_by_active_session(self):
+        from fastmcp.exceptions import ToolError
+        from claude_chatter.mcp_server import build_mcp_server
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2.0)"])
+        fake_desc = os.path.join(sessions_dir, f"{proc.pid}.json")
+        desc_data = {
+            "name": "already-active-sess",
+            "pid": proc.pid,
+            "cwd": "/some/other/cwd"
+        }
+        with open(fake_desc, "w", encoding="utf-8") as f:
+            json.dump(desc_data, f)
+
+        bridge = ClaudeMessagingProtocol(
+            bridge_socket_path=self.sock_path,
+            session_name="my-curr-sess",
+            db_path=self.db_path
+        )
+        bridge.register_session_descriptor(session_name="my-curr-sess")
+        server = build_mcp_server(bridge)
+        rename_fn = (await server.get_tool("rename_session")).fn
+
+        try:
+            with self.assertRaises(ToolError) as ctx:
+                await rename_fn(new_name="already-active-sess")
+            self.assertIn("currently in use by an active session", str(ctx.exception))
+            self.assertEqual(bridge.session_name, "my-curr-sess")
+        finally:
+            proc.kill()
+            proc.wait()
+            if os.path.exists(fake_desc):
+                os.remove(fake_desc)
+            bridge.cleanup_session_descriptor()
+            bridge.cleanup_socket()
+
+    async def test_rename_retains_renamed_copy_on_duplicate_msg_id(self):
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.save_message("shared_id", {
+            "direction": "inbound",
+            "read": False,
+            "content": "target copy",
+            "timestamp": 1.0
+        }, "target-session")
+
+        store.save_message("shared_id", {
+            "direction": "inbound",
+            "read": False,
+            "content": "renamed source copy",
+            "timestamp": 2.0
+        }, "source-session")
+
+        store.rename_session("source-session", "target-session")
+        merged = store.load_session_messages("target-session")
+        self.assertIn("shared_id", merged)
+        self.assertEqual(merged["shared_id"]["content"], "renamed source copy")
+        store.close()
 
 
 class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):

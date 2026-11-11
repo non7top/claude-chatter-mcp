@@ -16,6 +16,7 @@ import uuid
 import stat
 import time
 import string
+import sqlite3
 import hashlib
 import secrets
 import asyncio
@@ -77,6 +78,9 @@ class ClaudeMessagingProtocol:
                     else:
                         self.session_id = str(uuid.uuid4())
             self.store.ensure_session(self.session_name, cwd_digest=self._cwd_digest(), session_id=self.session_id)
+            if not getattr(self, "_is_clashing", False):
+                self.persist_default_session_name(self.session_name)
+                self.persist_session_id(self.session_id)
             initial_messages = self.store.load_session_messages(self.session_id)
             self.response_store = ResponseStore(
                 store=self.store,
@@ -89,6 +93,9 @@ class ClaudeMessagingProtocol:
             self.db_path = None
             self.store = None
             self.session_id = session_id or (self._derive_session_id() if not session_name else str(uuid.uuid4()))
+            if not getattr(self, "_is_clashing", False):
+                self.persist_default_session_name(self.session_name)
+                self.persist_session_id(self.session_id)
             self.response_store = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
@@ -125,7 +132,8 @@ class ClaudeMessagingProtocol:
     def resolve_session_name(
         cls,
         explicit_name: Optional[str] = None,
-        project_path: Optional[str] = None
+        project_path: Optional[str] = None,
+        db_path: Optional[str] = None
     ) -> str:
         if explicit_name:
             return explicit_name
@@ -134,20 +142,27 @@ class ClaudeMessagingProtocol:
             return env_name
 
         path = project_path or cls._find_project_path()
-        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
-        if os.path.exists(sessions_dir):
-            for fpath in glob.glob(os.path.join(sessions_dir, "*.json")):
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    if os.path.realpath(meta.get("cwd", "")) == os.path.realpath(path) and meta.get("name"):
-                        pid = meta.get("pid")
-                        if pid and cls._static_is_pid_alive(pid):
-                            return meta["name"]
-                except (OSError, ValueError):
-                    continue
+        persisted = cls.read_persisted_session_name(path)
+        if persisted:
+            return persisted
 
-        return cls.read_persisted_session_name(path)
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+        db = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if os.path.exists(db):
+            try:
+                uri = f"file:{os.path.abspath(db)}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
+                    cur = conn.execute(
+                        "SELECT current_name FROM sessions WHERE cwd_digest = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                        (digest,)
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return row[0]
+            except Exception:
+                pass
+
+        return ""
 
     def _project_path(self) -> str:
         return self._find_project_path()
@@ -210,6 +225,7 @@ class ClaudeMessagingProtocol:
             persisted = self._random_session_name()
             self.persist_default_session_name(persisted)
         if self._session_name_in_use(persisted, wait_if_same_cwd=True):
+            self._is_clashing = True
             return self._random_session_name()
         return persisted
 
@@ -253,7 +269,11 @@ class ClaudeMessagingProtocol:
                 pid = meta.get("pid")
                 if meta.get("name") == name and pid != self.pid and self._is_pid_alive(pid):
                     in_use_by_other = True
-                    if meta.get("cwd") == self._project_path():
+                    desc_proj = meta.get("projectPath") or meta.get("cwd") or ""
+                    desc_digest = meta.get("cwdDigest") or ""
+                    if (desc_digest and desc_digest == self._cwd_digest()) or (
+                        desc_proj and os.path.realpath(desc_proj) == os.path.realpath(self._project_path())
+                    ):
                         same_cwd = True
                     break
 
@@ -278,6 +298,14 @@ class ClaudeMessagingProtocol:
             logger.info(f"Persisted '{name}' as this workspace's default session name.")
         except OSError as e:
             logger.error(f"Failed to persist session name '{name}': {e}")
+
+    def persist_session_id(self, session_id: str):
+        try:
+            with open(self._persisted_id_path(self._cwd_digest()), "w", encoding="utf-8") as f:
+                f.write(session_id)
+            logger.info(f"Persisted '{session_id}' as this workspace's session id.")
+        except OSError as e:
+            logger.error(f"Failed to persist session id '{session_id}': {e}")
 
     def _get_default_socket_path(self, pid: int, session_name: Optional[str] = None) -> str:
         sname = (session_name or getattr(self, "session_name", "bridge")).replace("/", "-")
@@ -588,6 +616,8 @@ class ClaudeMessagingProtocol:
             "pid": self.registered_pid,
             "sessionId": self.registered_session_id,
             "cwd": os.getcwd(),
+            "projectPath": self._project_path(),
+            "cwdDigest": self._cwd_digest(),
             "startedAt": now,
             "procStart": self._compute_proc_start(self.registered_pid),
             "version": "2.1.282",
@@ -751,12 +781,20 @@ class ClaudeMessagingProtocol:
         return unread
 
     def rename_session_in_store(self, old_name: str, new_name: str):
+        """
+        Renames the session in SQLite storage, migrating message histories.
+        When renaming onto a session name with existing message history in
+        storage, duplicate msg_ids retain the renamed session's copy.
+        """
         if self.store:
             self.session_id = self.store.rename_session(
                 old_name,
                 new_name,
                 session_id=getattr(self, "session_id", None)
             )
+        self.persist_default_session_name(new_name)
+        if getattr(self, "session_id", None):
+            self.persist_session_id(self.session_id)
         if isinstance(self.response_store, ResponseStore):
             self.response_store.set_session_name(new_name, getattr(self, "session_id", None))
 

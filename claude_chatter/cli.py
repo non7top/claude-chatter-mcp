@@ -89,7 +89,7 @@ def main():
         sys.exit(0)
 
     elif args.inbox:
-        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name)
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name, db_path=args.db)
         if not target_name:
             print(json.dumps({}, indent=2))
             sys.exit(0)
@@ -99,7 +99,7 @@ def main():
         sys.exit(0)
 
     elif args.history:
-        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name)
+        target_name = ClaudeMessagingProtocol.resolve_session_name(args.name, db_path=args.db)
         if not target_name:
             print(json.dumps({}, indent=2))
             sys.exit(0)

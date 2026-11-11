@@ -14,45 +14,44 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("SocketBridgeMCP")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
-    current_name TEXT NOT NULL,
-    cwd_digest TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
+SCHEMA_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        current_name TEXT NOT NULL,
+        cwd_digest TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS session_aliases (
+        alias_name TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        PRIMARY KEY (alias_name, session_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS messages (
+        msg_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        session_name TEXT NOT NULL,
+        cwd_digest TEXT,
+        direction TEXT NOT NULL,
+        read INTEGER NOT NULL DEFAULT 0,
+        sender TEXT,
+        target_session TEXT,
+        target_pid INTEGER,
+        content TEXT,
+        status TEXT,
+        timestamp REAL NOT NULL,
+        entry_json TEXT NOT NULL,
+        PRIMARY KEY (session_id, msg_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages (session_id, direction, read)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_session_name ON messages (session_name, direction, read)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions (current_name)",
+    "CREATE INDEX IF NOT EXISTS idx_session_aliases_name ON session_aliases (alias_name)",
+]
 
-CREATE TABLE IF NOT EXISTS session_aliases (
-    alias_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    PRIMARY KEY (alias_name, session_id)
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    msg_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    session_name TEXT NOT NULL,
-    cwd_digest TEXT,
-    direction TEXT NOT NULL,
-    read INTEGER NOT NULL DEFAULT 0,
-    sender TEXT,
-    target_session TEXT,
-    target_pid INTEGER,
-    content TEXT,
-    status TEXT,
-    timestamp REAL NOT NULL,
-    entry_json TEXT NOT NULL,
-    PRIMARY KEY (session_id, msg_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages (session_id, direction, read);
-CREATE INDEX IF NOT EXISTS idx_messages_session_name ON messages (session_name, direction, read);
-CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp);
-CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions (current_name);
-CREATE INDEX IF NOT EXISTS idx_session_aliases_name ON session_aliases (alias_name);
-"""
+SCHEMA = "\n".join(s + ";" for s in SCHEMA_STATEMENTS)
 
 
 class MessageStore:
@@ -87,50 +86,73 @@ class MessageStore:
                     os.chmod(self.db_path, stat.S_IRUSR | stat.S_IWUSR)
                 except OSError:
                     pass
-            with conn:
-                cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
-                if cur.fetchone():
-                    info = conn.execute("PRAGMA table_info(messages)").fetchall()
-                    col_names = {row["name"] for row in info}
-                    if "session_id" not in col_names:
-                        logger.info("Migrating messages table to schema v2 with stable session_id")
-                        conn.execute(
-                            """
-                            CREATE TABLE IF NOT EXISTS sessions (
-                                session_id TEXT PRIMARY KEY,
-                                current_name TEXT NOT NULL,
-                                cwd_digest TEXT,
-                                created_at REAL NOT NULL,
-                                updated_at REAL NOT NULL
-                            )
-                            """
+
+            cur_old = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages_old'")
+            if cur_old.fetchone():
+                logger.warning("Found orphaned messages_old table from an interrupted migration; recovering...")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for stmt in SCHEMA_STATEMENTS:
+                        conn.execute(stmt)
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO messages (
+                            msg_id, session_id, session_name, cwd_digest, direction, read,
+                            sender, target_session, target_pid, content, status,
+                            timestamp, entry_json
                         )
-                        conn.execute(
-                            """
-                            CREATE TABLE IF NOT EXISTS session_aliases (
-                                alias_name TEXT NOT NULL,
-                                session_id TEXT NOT NULL,
-                                created_at REAL NOT NULL,
-                                PRIMARY KEY (alias_name, session_id)
-                            )
-                            """
-                        )
+                        SELECT
+                            m.msg_id,
+                            COALESCE(s.session_id, m.session_name),
+                            m.session_name,
+                            m.cwd_digest,
+                            m.direction,
+                            m.read,
+                            m.sender,
+                            m.target_session,
+                            m.target_pid,
+                            m.content,
+                            m.status,
+                            m.timestamp,
+                            m.entry_json
+                        FROM messages_old m
+                        LEFT JOIN sessions s ON m.session_name = s.current_name
+                        """
+                    )
+                    conn.execute("DROP TABLE messages_old")
+                    conn.execute("PRAGMA user_version = 2;")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
+            if cur.fetchone():
+                info = conn.execute("PRAGMA table_info(messages)").fetchall()
+                col_names = {row["name"] for row in info}
+                if "session_id" not in col_names:
+                    logger.info("Migrating messages table to schema v2 with stable session_id")
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        conn.execute(SCHEMA_STATEMENTS[0])
+                        conn.execute(SCHEMA_STATEMENTS[1])
                         s_cur = conn.execute("SELECT DISTINCT session_name, cwd_digest FROM messages")
+                        now = time.time()
                         for s_row in s_cur.fetchall():
                             sname = s_row["session_name"]
                             cdigest = s_row["cwd_digest"] or ""
                             sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, sname))
                             conn.execute(
                                 "INSERT OR IGNORE INTO sessions VALUES (?, ?, ?, ?, ?)",
-                                (sid, sname, cdigest, time.time(), time.time())
+                                (sid, sname, cdigest, now, now)
                             )
                             conn.execute(
                                 "INSERT OR IGNORE INTO session_aliases VALUES (?, ?, ?)",
-                                (sname, sid, time.time())
+                                (sname, sid, now)
                             )
-                        conn.execute("DROP TABLE IF EXISTS messages_old")
                         conn.execute("ALTER TABLE messages RENAME TO messages_old")
-                        conn.executescript(SCHEMA)
+                        for stmt in SCHEMA_STATEMENTS[2:]:
+                            conn.execute(stmt)
                         conn.execute(
                             """
                             INSERT OR IGNORE INTO messages (
@@ -157,11 +179,21 @@ class MessageStore:
                             """
                         )
                         conn.execute("DROP TABLE messages_old")
-                    else:
-                        conn.executescript(SCHEMA)
+                        conn.execute("PRAGMA user_version = 2;")
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
                 else:
-                    conn.executescript(SCHEMA)
-                conn.execute("PRAGMA user_version = 2;")
+                    with conn:
+                        for stmt in SCHEMA_STATEMENTS:
+                            conn.execute(stmt)
+                        conn.execute("PRAGMA user_version = 2;")
+            else:
+                with conn:
+                    for stmt in SCHEMA_STATEMENTS:
+                        conn.execute(stmt)
+                    conn.execute("PRAGMA user_version = 2;")
         except Exception as e:
             logger.error(f"Failed to initialize SQLite store at {self.db_path}: {e}")
             sys.stderr.write(f"Warning: Failed to initialize SQLite store at {self.db_path}: {e}\n")
@@ -196,24 +228,32 @@ class MessageStore:
                     if row:
                         if row["current_name"] != session_name:
                             conn.execute(
-                                "INSERT OR IGNORE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
+                                "INSERT OR REPLACE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
                                 (row["current_name"], session_id, now)
                             )
+                            conn.execute("DELETE FROM session_aliases WHERE alias_name = ?", (session_name,))
                             conn.execute(
-                                "UPDATE sessions SET current_name = ?, updated_at = ? WHERE session_id = ?",
-                                (session_name, now, session_id)
+                                "INSERT INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
+                                (session_name, session_id, now)
+                            )
+                            conn.execute(
+                                "UPDATE sessions SET current_name = ?, cwd_digest = COALESCE(NULLIF(?, ''), cwd_digest), updated_at = ? WHERE session_id = ?",
+                                (session_name, cwd_digest, now, session_id)
                             )
                         return session_id
+
                     cur = conn.execute("SELECT session_id FROM sessions WHERE current_name = ?", (session_name,))
                     existing = cur.fetchone()
                     if existing:
                         return existing["session_id"]
+
+                    conn.execute("DELETE FROM session_aliases WHERE alias_name = ?", (session_name,))
                     conn.execute(
                         "INSERT INTO sessions (session_id, current_name, cwd_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                         (session_id, session_name, cwd_digest, now, now)
                     )
                     conn.execute(
-                        "INSERT OR IGNORE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
+                        "INSERT INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
                         (session_name, session_id, now)
                     )
                     return session_id
@@ -223,21 +263,14 @@ class MessageStore:
                 if row:
                     return row["session_id"]
 
-                cur = conn.execute(
-                    "SELECT session_id FROM session_aliases WHERE alias_name = ? ORDER BY created_at DESC LIMIT 1",
-                    (session_name,)
-                )
-                alias_row = cur.fetchone()
-                if alias_row:
-                    return alias_row["session_id"]
-
                 sid = str(uuid.uuid4())
+                conn.execute("DELETE FROM session_aliases WHERE alias_name = ?", (session_name,))
                 conn.execute(
                     "INSERT INTO sessions (session_id, current_name, cwd_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                     (sid, session_name, cwd_digest, now, now)
                 )
                 conn.execute(
-                    "INSERT OR IGNORE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
+                    "INSERT INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
                     (session_name, sid, now)
                 )
                 return sid
@@ -269,6 +302,22 @@ class MessageStore:
                 return row["session_id"]
         except Exception as e:
             logger.error(f"Failed to resolve session id for {name_or_id}: {e}")
+        return None
+
+    def resolve_session_by_cwd_digest(self, cwd_digest: str) -> Optional[str]:
+        if self._disabled or not cwd_digest:
+            return None
+        try:
+            conn = self._get_connection()
+            cur = conn.execute(
+                "SELECT current_name FROM sessions WHERE cwd_digest = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (cwd_digest,)
+            )
+            row = cur.fetchone()
+            if row and row["current_name"]:
+                return row["current_name"]
+        except Exception as e:
+            logger.error(f"Failed to resolve session by cwd_digest {cwd_digest}: {e}")
         return None
 
     def save_message(
@@ -463,8 +512,9 @@ class MessageStore:
                 "INSERT OR REPLACE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
                 (old_name, sess_id, now)
             )
+            conn.execute("DELETE FROM session_aliases WHERE alias_name = ?", (new_name,))
             conn.execute(
-                "INSERT OR REPLACE INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
+                "INSERT INTO session_aliases (alias_name, session_id, created_at) VALUES (?, ?, ?)",
                 (new_name, sess_id, now)
             )
             conn.execute(
