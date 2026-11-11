@@ -692,6 +692,104 @@ class TestMessagePersistenceAndSQLite(unittest.IsolatedAsyncioTestCase):
             if os.path.exists(name_file):
                 os.remove(name_file)
 
+    async def test_cli_readonly_inbox_leaves_identity_and_db_unchanged(self):
+        ws_dir = os.path.join(self.tmp_dir.name, "readonly_cli_ws")
+        os.makedirs(ws_dir, exist_ok=True)
+        ws_digest = hashlib.sha1(ws_dir.encode("utf-8")).hexdigest()[:8]
+
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        os.makedirs(names_dir, exist_ok=True)
+        name_file = os.path.join(names_dir, f"{ws_digest}.name")
+        id_file = os.path.join(names_dir, f"{ws_digest}.id")
+
+        local_name = "local-bridge-sess"
+        local_id = str(uuid.uuid4())
+        with open(name_file, "w", encoding="utf-8") as f:
+            f.write(local_name)
+        with open(id_file, "w", encoding="utf-8") as f:
+            f.write(local_id)
+
+        from claude_chatter.storage import MessageStore
+        store = MessageStore(self.db_path)
+        store.ensure_session(local_name, cwd_digest=ws_digest, session_id=local_id)
+        store.close()
+
+        try:
+            cmd = [
+                sys.executable, "-m", "claude_chatter.cli",
+                "--inbox", "--name", "other-external-sess", "--db", self.db_path
+            ]
+            res = subprocess.run(cmd, cwd=ws_dir, capture_output=True, text=True, check=True)
+            self.assertEqual(res.stdout.strip(), "{}")
+
+            with open(name_file, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read().strip(), local_name)
+            with open(id_file, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read().strip(), local_id)
+
+            store_check = MessageStore(self.db_path)
+            self.assertIsNone(store_check.resolve_session_id("other-external-sess"))
+            with store_check._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT current_name FROM sessions WHERE current_name = ?", ("other-external-sess",))
+                self.assertIsNone(cursor.fetchone())
+                cursor.execute("SELECT alias_name FROM session_aliases WHERE alias_name = ?", ("other-external-sess",))
+                self.assertIsNone(cursor.fetchone())
+            store_check.close()
+        finally:
+            if os.path.exists(name_file):
+                os.remove(name_file)
+            if os.path.exists(id_file):
+                os.remove(id_file)
+
+    async def test_cli_list_returns_promptly_with_live_same_project_holder(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        fake_desc = os.path.join(sessions_dir, f"{proc.pid}.json")
+
+        cur_cwd = os.getcwd()
+        cur_digest = hashlib.sha1(cur_cwd.encode("utf-8")).hexdigest()[:8]
+        desc_data = {
+            "name": "holder-sess",
+            "pid": proc.pid,
+            "cwd": cur_cwd,
+            "projectPath": cur_cwd,
+            "cwdDigest": cur_digest
+        }
+        with open(fake_desc, "w", encoding="utf-8") as f:
+            json.dump(desc_data, f)
+
+        names_dir = os.path.join(os.path.expanduser("~"), ".claude", "chatter-session-names")
+        os.makedirs(names_dir, exist_ok=True)
+        name_file = os.path.join(names_dir, f"{cur_digest}.name")
+        with open(name_file, "w", encoding="utf-8") as f:
+            f.write("holder-sess")
+
+        try:
+            t0 = time.time()
+            cli_proto = ClaudeMessagingProtocol(
+                bridge_socket_path=None,
+                enable_storage=False,
+                as_bridge=False
+            )
+            t1 = time.time()
+            self.assertLess(t1 - t0, 0.5)
+            self.assertNotEqual(cli_proto.session_name, "holder-sess")
+
+            t_cmd0 = time.time()
+            cmd = [sys.executable, "-m", "claude_chatter.cli", "--list"]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            t_cmd1 = time.time()
+            self.assertLess(t_cmd1 - t_cmd0, 0.8)
+        finally:
+            proc.kill()
+            proc.wait()
+            if os.path.exists(fake_desc):
+                os.remove(fake_desc)
+            if os.path.exists(name_file):
+                os.remove(name_file)
+
     async def test_periodic_prune_on_save_message(self):
         from claude_chatter.storage import MessageStore
         store = MessageStore(self.db_path)

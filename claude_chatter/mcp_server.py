@@ -306,7 +306,8 @@ def make_protocol(
     return ClaudeMessagingProtocol(
         bridge_socket_path=bridge_socket_path,
         session_name=session_name,
-        db_path=db_path
+        db_path=db_path,
+        as_bridge=True
     )
 
 

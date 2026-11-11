@@ -70,7 +70,7 @@ def main():
         sys.exit(0 if result.get("ok") else 1)
 
     elif args.list:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_list():
             peers = await protocol.verify_and_purge_sessions()
@@ -80,7 +80,7 @@ def main():
 
     elif args.jobs:
         from .jobs import list_jobs
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_jobs():
             peers = await protocol.verify_and_purge_sessions()
@@ -93,9 +93,20 @@ def main():
         if not target_name:
             print(json.dumps({}, indent=2))
             sys.exit(0)
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
-        unread = protocol.get_unread_messages(mark_read=False)
+        db_file = args.db or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if not os.path.exists(db_file):
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        from .storage import MessageStore
+        store = MessageStore(db_file)
+        all_msgs = store.load_session_messages(target_name)
+        unread = {
+            k: v for k, v in all_msgs.items()
+            if v.get("direction") == "inbound" and not v.get("read", False)
+        }
+        unread = dict(sorted(unread.items(), key=lambda kv: kv[1].get("timestamp", 0)))
         print(json.dumps(unread, indent=2))
+        store.close()
         sys.exit(0)
 
     elif args.history:
@@ -103,12 +114,20 @@ def main():
         if not target_name:
             print(json.dumps({}, indent=2))
             sys.exit(0)
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=target_name, db_path=args.db)
-        print(json.dumps(protocol.response_store, indent=2))
+        db_file = args.db or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
+        if not os.path.exists(db_file):
+            print(json.dumps({}, indent=2))
+            sys.exit(0)
+        from .storage import MessageStore
+        store = MessageStore(db_file)
+        all_msgs = store.load_session_messages(target_name)
+        all_msgs = dict(sorted(all_msgs.items(), key=lambda kv: kv[1].get("timestamp", 0)))
+        print(json.dumps(all_msgs, indent=2))
+        store.close()
         sys.exit(0)
 
     elif args.purge:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
 
         async def _cmd_purge():
             peers = await protocol.verify_and_purge_sessions()
@@ -117,7 +136,7 @@ def main():
         sys.exit(0)
 
     elif args.send:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, enable_storage=False, as_bridge=False)
         target_session, message_text = args.send[0], args.send[1]
 
         async def _cmd_send():
@@ -132,7 +151,7 @@ def main():
         sys.exit(0)
 
     elif args.standalone:
-        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db)
+        protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name, db_path=args.db, as_bridge=True)
         try:
             asyncio.run(run_standalone(protocol))
         except (KeyboardInterrupt, SystemExit):

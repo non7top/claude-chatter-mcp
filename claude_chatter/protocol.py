@@ -37,7 +37,9 @@ class ClaudeMessagingProtocol:
         on_inbound_message: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         db_path: Optional[str] = None,
         enable_storage: bool = True,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        as_bridge: bool = True,
+        read_only: bool = False
     ):
         """
         on_inbound_message(method, params), if given, is invoked whenever a real
@@ -49,6 +51,8 @@ class ClaudeMessagingProtocol:
         self.home_dir = os.path.expanduser("~")
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
         self.on_inbound_message = on_inbound_message
+        self.as_bridge = as_bridge
+        self.read_only = read_only
 
         env_name = os.environ.get("CHATTER_SESSION_NAME") or os.environ.get("AGY_SESSION_NAME")
         self.session_name = session_name or env_name or self._derive_default_session_name()
@@ -64,7 +68,8 @@ class ClaudeMessagingProtocol:
         if enable_storage:
             self.db_path = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(self.home_dir, ".claude", "chatter-messages.db")
             self.store = MessageStore(self.db_path)
-            self.store.prune()
+            if not self.read_only:
+                self.store.prune()
             if session_id:
                 self.session_id = session_id
             else:
@@ -77,11 +82,12 @@ class ClaudeMessagingProtocol:
                         self.session_id = self._derive_session_id()
                     else:
                         self.session_id = str(uuid.uuid4())
-            self.store.ensure_session(self.session_name, cwd_digest=self._cwd_digest(), session_id=self.session_id)
-            if not getattr(self, "_is_clashing", False):
-                self.persist_default_session_name(self.session_name)
-                self.persist_session_id(self.session_id)
-            initial_messages = self.store.load_session_messages(self.session_id)
+            if not self.read_only:
+                self.store.ensure_session(self.session_name, cwd_digest=self._cwd_digest(), session_id=self.session_id)
+                if self.as_bridge and not getattr(self, "_is_clashing", False) and not session_name and not env_name:
+                    self.persist_default_session_name(self.session_name)
+                    self.persist_session_id(self.session_id)
+            initial_messages = self.store.load_session_messages(self.session_id or self.session_name)
             self.response_store = ResponseStore(
                 store=self.store,
                 session_name=self.session_name,
@@ -93,7 +99,7 @@ class ClaudeMessagingProtocol:
             self.db_path = None
             self.store = None
             self.session_id = session_id or (self._derive_session_id() if not session_name else str(uuid.uuid4()))
-            if not getattr(self, "_is_clashing", False):
+            if not self.read_only and self.as_bridge and not getattr(self, "_is_clashing", False) and not session_name and not env_name:
                 self.persist_default_session_name(self.session_name)
                 self.persist_session_id(self.session_id)
             self.response_store = {}
@@ -142,11 +148,8 @@ class ClaudeMessagingProtocol:
             return env_name
 
         path = project_path or cls._find_project_path()
-        persisted = cls.read_persisted_session_name(path)
-        if persisted:
-            return persisted
-
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:8]
+
         db = db_path or os.environ.get("CHATTER_DB_PATH") or os.path.join(os.path.expanduser("~"), ".claude", "chatter-messages.db")
         if os.path.exists(db):
             try:
@@ -161,6 +164,10 @@ class ClaudeMessagingProtocol:
                         return row[0]
             except Exception:
                 pass
+
+        persisted = cls.read_persisted_session_name(path)
+        if persisted:
+            return persisted
 
         return ""
 
@@ -196,11 +203,12 @@ class ClaudeMessagingProtocol:
         except OSError:
             pass
         sid = str(uuid.uuid4())
-        try:
-            with open(id_path, "w", encoding="utf-8") as f:
-                f.write(sid)
-        except OSError:
-            pass
+        if self.as_bridge and not self.read_only:
+            try:
+                with open(id_path, "w", encoding="utf-8") as f:
+                    f.write(sid)
+            except OSError:
+                pass
         return sid
 
     def _derive_default_session_name(self) -> str:
@@ -223,8 +231,9 @@ class ClaudeMessagingProtocol:
             persisted = ""
         if not persisted:
             persisted = self._random_session_name()
-            self.persist_default_session_name(persisted)
-        if self._session_name_in_use(persisted, wait_if_same_cwd=True):
+            if self.as_bridge and not self.read_only:
+                self.persist_default_session_name(persisted)
+        if self._session_name_in_use(persisted, wait_if_same_cwd=self.as_bridge):
             self._is_clashing = True
             return self._random_session_name()
         return persisted
