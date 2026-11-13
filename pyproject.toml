@@ -4,17 +4,38 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-chatter-mcp"
-version = "0.3.0"
-description = "claude-chatter-mcp bridges MCP compatible agents to Claude's SendMessage/ListAgents implementation, allowing bidirectional communication."
+version = "0.4.0"
+description = "MCP server that lets Antigravity (agy) and other MCP hosts message Claude Code sessions, with push wake-up for idle agy conversations."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "non7top" }]
+keywords = ["mcp", "claude-code", "antigravity", "agy", "peer-messaging", "ipc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "claude-chatter>=0.2.1",
     "psutil>=5.9.0",
     "fastmcp>=4.0.10",
 ]
+
+[project.urls]
+Homepage = "https://github.com/non7top/claude-chatter-mcp"
+Source = "https://github.com/non7top/claude-chatter-mcp"
+Issues = "https://github.com/non7top/claude-chatter-mcp/issues"
 
 [project.scripts]
 bridge-mcp = "claude_chatter_mcp.cli:main"

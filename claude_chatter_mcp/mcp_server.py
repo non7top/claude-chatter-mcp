@@ -8,6 +8,7 @@ import json
 import signal
 import asyncio
 import logging
+import importlib.metadata
 import psutil
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
@@ -23,6 +24,13 @@ from agy_wakeup.prime import Prime
 from .agy_glue import make_prime
 
 logger = logging.getLogger("SocketBridgeMCP")
+
+
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("claude-chatter-mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return "0+unknown"
 
 INSTRUCTIONS = (
     "Bi-Directional AI Communication MCP Bridge for Claude Code sessions. "
@@ -181,7 +189,7 @@ def build_mcp_server(protocol: ClaudeClient, prime: Optional[Prime] = None) -> F
     lenient_arguments = _LenientArgumentsMiddleware()
     mcp = FastMCP(
         name="claudemessaging",
-        version="0.3.0",
+        version=_package_version(),
         instructions=INSTRUCTIONS,
         lifespan=_lifespan,
         middleware=[_SessionCaptureMiddleware(last_session_holder), lenient_arguments]
