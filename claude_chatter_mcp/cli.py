@@ -73,14 +73,13 @@ def main():
 
     args = parser.parse_args()
 
-    if args.prime_hook:
-        from .hook import run
-        print(run(sys.stdin.read()))
-        sys.exit(0)
-
-    elif args.prime:
-        from .prime import prime_from_shell
-        result = prime_from_shell()
+    if args.prime_hook or args.prime:
+        from .agy_glue import make_prime
+        prime = make_prime()
+        if args.prime_hook:
+            print(prime.run_hook(sys.stdin.read()))
+            sys.exit(0)
+        result = prime.prime_from_shell()
         print(json.dumps(result, indent=2))
         sys.exit(0 if result.get("ok") else 1)
 

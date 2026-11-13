@@ -8,4 +8,4 @@ services:
     volumes:
       - .:/app
     working_dir: /app
-    command: python -m pytest test_suite.py -v
+    command: python -m pytest test_suite.py test_agy_wakeup.py -v

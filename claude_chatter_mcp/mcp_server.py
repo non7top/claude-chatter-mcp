@@ -17,8 +17,10 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
 from claude_chatter import ClaudeClient, list_jobs as _list_jobs
+from agy_wakeup.control import control_socket_path
+from agy_wakeup.prime import Prime
 
-from .prime import AgyPoker, control_socket_path, prime_command
+from .agy_glue import make_prime
 
 logger = logging.getLogger("SocketBridgeMCP")
 
@@ -109,7 +111,7 @@ class _LenientArgumentsMiddleware(Middleware):
         return await call_next(context.copy(message=context.message.model_copy(update={"arguments": cleaned})))
 
 
-def build_mcp_server(protocol: ClaudeClient) -> FastMCP:
+def build_mcp_server(protocol: ClaudeClient, prime: Optional[Prime] = None) -> FastMCP:
     """
     Builds a FastMCP server wired to the given client instance. A factory
     rather than a module-level singleton so each process's client gets its
@@ -142,7 +144,8 @@ def build_mcp_server(protocol: ClaudeClient) -> FastMCP:
         except Exception as e:
             logger.error(f"Failed to send tool_list_changed notification: {e}")
 
-    poker = AgyPoker()
+    prime = prime or make_prime()
+    poker = prime.new_poker()
     try:
         under_agy = any(p.name() == "agy" for p in psutil.Process().parents())
     except psutil.Error:
@@ -262,7 +265,7 @@ def build_mcp_server(protocol: ClaudeClient) -> FastMCP:
     @mcp.tool()
     async def enable_push() -> str:
         """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
-        command = prime_command()
+        command = prime.command()
         result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
         if not poker.primed:
             result["next_step"] = (

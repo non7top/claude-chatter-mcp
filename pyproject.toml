@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 bridge-mcp = "claude_chatter_mcp.cli:main"
+agy-wakeup = "agy_wakeup.cli:main"
 
 [tool.setuptools]
-packages = ["claude_chatter_mcp"]
+packages = ["claude_chatter_mcp", "agy_wakeup"]
