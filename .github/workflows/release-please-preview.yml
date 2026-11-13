@@ -1,0 +1,21 @@
+name: release-please-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    uses: non7top/gh-workflows/.github/workflows/release-please-preview.yml@main
+    permissions:
+      contents: read
+      pull-requests: write

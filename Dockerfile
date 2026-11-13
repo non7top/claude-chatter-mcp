@@ -3,17 +3,19 @@ FROM python:3.14-slim
 ARG UID=1000
 ARG GID=1000
 
-RUN groupadd -g ${GID} appuser \
-    && useradd -m -u ${UID} -g ${GID} -d /home/appuser appuser
+RUN set -e; \
+    if ! getent group "${GID}" >/dev/null; then groupadd -g "${GID}" appuser; fi; \
+    if ! getent passwd "${UID}" >/dev/null; then useradd -m -u "${UID}" -g "${GID}" -d /home/appuser appuser; fi
 
 WORKDIR /app
 
 # Install dependencies first (pyproject.toml + the claude_chatter_mcp package) so
 # the pip layer is cached independently of test_suite.py edits.
-COPY pyproject.toml bridge_mcp.py ./
+COPY pyproject.toml README.md LICENSE bridge_mcp.py ./
 COPY claude_chatter_mcp/ ./claude_chatter_mcp/
 COPY agy_wakeup/ ./agy_wakeup/
-RUN pip install --no-cache-dir . pytest
+RUN pip install --no-cache-dir build pytest \
+    && pip install --no-cache-dir .
 
 COPY test_suite.py test_agy_wakeup.py ./
 
@@ -22,9 +24,9 @@ COPY test_suite.py test_agy_wakeup.py ./
 # real session discovery - tests must never be able to see or mutate a
 # developer's actual live sessions.
 RUN mkdir -p /home/appuser/.claude/sessions /home/appuser/.claude/projects \
-    && chown -R appuser:appuser /home/appuser /app
+    && chown -R "${UID}:${GID}" /home/appuser /app
 
-USER appuser
+USER ${UID}:${GID}
 ENV HOME=/home/appuser
 
 CMD ["python", "-m", "pytest", "test_suite.py", "test_agy_wakeup.py", "-v"]
