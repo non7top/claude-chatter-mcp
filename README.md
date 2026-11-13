@@ -2,9 +2,17 @@
 
 `claude-chatter-mcp` lets MCP-compatible agents (built for **Google Antigravity**) exchange messages with Claude Code sessions. It speaks Claude Code's peer-messaging protocol (`SendMessage`/`ListAgents`): the bridge announces itself as a session and talks to other sessions over their Unix sockets. Non-blocking and authenticated.
 
-The protocol, storage and CLI core lives in the [`claude-chatter`](https://pypi.org/project/claude-chatter/) library (a dependency of this package); this repo adds the MCP server, the `agy` push priming and the plugin files on top.
+It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemon/CLI, and as an **Antigravity CLI (`agy`) plugin** that bundles the MCP server, a `PreInvocation` hook that primes push, a rules file and the `chatter` skill (see [Option 5](#option-5-antigravity-plugin-mcp-server--push-priming)).
 
-It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemon/CLI, and as an **Antigravity CLI (`agy`) plugin** that bundles the MCP server, a `PreInvocation` hook that primes push, a rules file and the `chatter` skill (see [Option 4](#option-4-antigravity-plugin-mcp-server--push-priming)).
+## Packages
+
+This distribution installs two Python packages on top of the [`claude-chatter`](https://pypi.org/project/claude-chatter/) library:
+
+| Package | What it does |
+| --- | --- |
+| `claude-chatter` (separate PyPI library, a dependency) | The peer-messaging protocol: session discovery, socket transport, SQLite mailbox, jobs, and the `claude-chatter` / `chatter` CLI. |
+| `claude_chatter_mcp` | The MCP server and the `bridge-mcp` command. The plain CLI modes (`--list`, `--send`, `--inbox`, ...) are served by the library's CLI. |
+| `agy_wakeup` | Waking an idle Antigravity conversation: the prime command, the `PreInvocation` hook, the shell-side primer, the control socket and the `agentapi send-message` call. It does not import `claude_chatter_mcp`; `claude_chatter_mcp/agy_glue.py` configures it for this bridge. The `agy-wakeup` command exposes its `--prime` and `--prime-hook` modes. |
 
 ## 🚀 Key Features
 
@@ -45,7 +53,23 @@ It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemo
 
 ## 📦 Installation & Setup
 
-### Option 1: Via `uvx` or `uv tool run` (Zero-Installation / Ephemeral)
+### Option 1: From PyPI
+
+```bash
+# Zero-installation, register with Antigravity CLI (agy):
+agy mcp add claudemessaging uvx --from claude-chatter-mcp bridge-mcp
+
+# Or install the commands permanently (bridge-mcp, agy-wakeup, claude-chatter, chatter):
+uv tool install claude-chatter-mcp
+# or: pipx install claude-chatter-mcp
+agy mcp add claudemessaging bridge-mcp
+```
+
+Requires Python 3.10 or newer. POSIX only, developed on Linux; see Limits below.
+
+---
+
+### Option 2: Via `uvx` or `uv tool run` from GitHub (Zero-Installation / Ephemeral)
 
 Register directly with **Antigravity CLI (`agy`)** from GitHub without cloning:
 
@@ -66,7 +90,7 @@ uvx --from git+https://github.com/non7top/claude-chatter-mcp.git bridge-mcp
 
 ---
 
-### Option 2: Permanent Tool Installation (`uv tool install`)
+### Option 3: Permanent Tool Installation from GitHub (`uv tool install`)
 
 Install the `bridge-mcp` binary permanently into your system path using `uv`:
 
@@ -80,7 +104,7 @@ agy mcp add claudemessaging bridge-mcp
 
 ---
 
-### Option 3: Local Repository Installation
+### Option 4: Local Repository Installation
 
 1. **Clone the repository**:
    ```bash
@@ -105,7 +129,7 @@ agy mcp add claudemessaging bridge-mcp
 
 ---
 
-### Option 4: Antigravity plugin (MCP server + push priming)
+### Option 5: Antigravity plugin (MCP server + push priming)
 
 This repo is also an Antigravity CLI plugin: `plugin.json`, `mcp_config.json` (the MCP server), `hooks.json` (a `PreInvocation` hook that primes push, see below) and `rules/claude-chatter.md`.
 
@@ -125,7 +149,11 @@ If you registered the server by hand earlier (`agy mcp add ...`), remove it so t
 
 1. The agent calls the `enable_push` tool, which returns a shell command (`bridge-mcp --prime`).
 2. The agent runs that command in its shell tool. It reads its own `ANTIGRAVITY_*` environment and hands it to its bridge over a `0600` control socket (`<bridge socket>.ctl`). The token is kept in memory only and passed to `agy` through the child's environment, never argv, logs or disk.
-3. From then on every inbound message makes the bridge run `agy agentapi send-message` with a fixed notice ("N new message(s) in your bridge inbox, call `read_messages`"). No sender-written text is injected.
+3. From then on every inbound message makes the bridge run `agy agentapi send-message` with a fixed notice ("N new message(s) in your bridge inbox, call `read_messages`"). No sender-written text is injected. Bursts are coalesced into one notice, and a push counts as delivered only when agy's reply names the conversation (`response.sendMessage.recipientId`); an unconfirmed push is recorded as an error and never resent.
+
+Optional: set `AGY_WAKEUP_PIN_AGY=1` to also pin the agy process that was primed (pid plus start time). The bridge then stops pushing and drops the stored credential once that process has ended or its pid has been reused.
+
+The bridge never edits agy's settings. If you want agy to stop asking before it runs the prime command, add a `command(...)` rule for it yourself (see agy's Permissions documentation); `~/.claude/chatter-bin/bridge-mcp` is the stable path to use.
 
 With the plugin installed, the `PreInvocation` hook (`bridge-mcp --prime-hook`) asks `agy` to run the priming command for any conversation that isn't primed yet, so the agent doesn't have to decide to. Whether `agy` honours that injected step is not yet verified; `rules/claude-chatter.md` and the `read_messages` `push_hint` are the fallbacks.
 
@@ -230,9 +258,7 @@ Execute single-shot operations directly from terminal:
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).
 * `chatter-bin/bridge-mcp` - a stable symlink to this install, so the prime command can be allow-listed.
 
-**Settings:** `--name` or `CHATTER_SESSION_NAME` (alias `AGY_SESSION_NAME`) sets the session name; `--socket` or `CHATTER_BRIDGE_SOCKET` (alias `AGY_MCP_BRIDGE_SOCKET`) sets the bridge socket. `AGY_WAKEUP_PIN_AGY=1` makes push stop, and drop the stored credential, once the agy process that was primed has ended or its pid has been reused (off by default).
-
-**Packages:** the Antigravity push logic (prime command, `PreInvocation` hook, shell-side primer, control socket, `agentapi send-message` with delivery confirmation) lives in the self-contained `agy_wakeup` package in this repo, which does not import `claude_chatter_mcp`; the `agy-wakeup` command exposes its `--prime` and `--prime-hook` modes, and `claude_chatter_mcp/agy_glue.py` configures it for this bridge.
+**Settings:** `--name` or `CHATTER_SESSION_NAME` (alias `AGY_SESSION_NAME`) sets the session name; `--socket` or `CHATTER_BRIDGE_SOCKET` (alias `AGY_MCP_BRIDGE_SOCKET`) sets the bridge socket. `AGY_WAKEUP_PIN_AGY=1` turns on agy process pinning (see the push section; off by default).
 
 **Security model:**
 * Peer tokens are read from each session's `.key` file and only used to authenticate outbound frames. `list_sessions` and `--list` do not print them.
@@ -245,7 +271,7 @@ Execute single-shot operations directly from terminal:
 * Developed on Linux: the default socket directory is `/run/user/<uid>/cc-socks` (fallback `/tmp/cc-socks`), and process start time and PID namespace come from `/proc` and `/etc/machine-id`, with placeholder values when those are unreadable.
 * `list_jobs` reads Claude Code's own job, roster and PR-cache files. Their layout is not a documented interface and may change; unparseable files are skipped.
 * Replies are asynchronous, and an idle Claude Code session may not answer until someone prompts it.
-* Push is best effort; keep calling `read_messages`. See [docs/agy-notes.md](docs/agy-notes.md) for the Antigravity details.
+* Push is best effort; keep calling `read_messages`. See [docs/agy-notes.md](https://github.com/non7top/claude-chatter-mcp/blob/master/docs/agy-notes.md) for the Antigravity details.
 
 ---
 
@@ -257,8 +283,10 @@ Run the included unit and integration test suites in a disposable non-root conta
 make test
 ```
 
+This runs `test_suite.py` (MCP server, CLI) and `test_agy_wakeup.py` (the `agy_wakeup` package). The protocol and storage tests live in the `claude-chatter` library.
+
 ---
 
 ## 📄 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](https://github.com/non7top/claude-chatter-mcp/blob/master/LICENSE) for details.
