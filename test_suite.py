@@ -73,6 +73,7 @@ class TestMcpToolsOnClient(unittest.IsolatedAsyncioTestCase):
 
         bridge.cleanup_socket()
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
     async def test_unwritable_db_directory_error_visibility(self):
         from claude_chatter.storage import MessageStore
         from claude_chatter_mcp.mcp_server import build_mcp_server

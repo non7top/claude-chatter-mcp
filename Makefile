@@ -3,7 +3,7 @@ DOCKER_GID := $(shell id -g)
 export DOCKER_UID
 export DOCKER_GID
 
-.PHONY: build test lint run stop destroy
+.PHONY: build test lint package clean run stop destroy
 
 build:
 	docker compose build
@@ -13,6 +13,12 @@ test: build
 
 lint: build
 	docker compose run --rm test python -m py_compile bridge_mcp.py test_suite.py test_agy_wakeup.py claude_chatter_mcp/*.py agy_wakeup/*.py
+
+package: build
+	docker compose run --rm test python -m build
+
+clean:
+	rm -rf dist/ build/ *.egg-info
 
 # There is no containerized `run`: bridge_mcp.py's whole job is to read/write the
 # HOST's real ~/.claude/sessions and its real Unix sockets under
