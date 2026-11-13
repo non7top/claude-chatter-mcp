@@ -8,16 +8,17 @@ RUN groupadd -g ${GID} appuser \
 
 WORKDIR /app
 
-# Install dependencies first (pyproject.toml + the claude_chatter package) so
+# Install dependencies first (pyproject.toml + the claude_chatter_mcp package) so
 # the pip layer is cached independently of test_suite.py edits.
 COPY pyproject.toml bridge_mcp.py ./
-COPY claude_chatter/ ./claude_chatter/
+COPY claude_chatter_mcp/ ./claude_chatter_mcp/
+COPY agy_wakeup/ ./agy_wakeup/
 RUN pip install --no-cache-dir . pytest
 
-COPY test_suite.py ./
+COPY test_suite.py test_agy_wakeup.py ./
 
 # Give this container its OWN $HOME (with its own ~/.claude/sessions), entirely
-# separate from the host's. claude_chatter reads/writes ~/.claude/sessions for
+# separate from the host's. claude_chatter (the library) reads/writes ~/.claude/sessions for
 # real session discovery - tests must never be able to see or mutate a
 # developer's actual live sessions.
 RUN mkdir -p /home/appuser/.claude/sessions /home/appuser/.claude/projects \
@@ -26,4 +27,4 @@ RUN mkdir -p /home/appuser/.claude/sessions /home/appuser/.claude/projects \
 USER appuser
 ENV HOME=/home/appuser
 
-CMD ["python", "-m", "pytest", "test_suite.py", "-v"]
+CMD ["python", "-m", "pytest", "test_suite.py", "test_agy_wakeup.py", "-v"]

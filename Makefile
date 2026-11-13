@@ -12,7 +12,7 @@ test: build
 	docker compose run --rm test
 
 lint: build
-	docker compose run --rm test python -m py_compile bridge_mcp.py test_suite.py claude_chatter/*.py
+	docker compose run --rm test python -m py_compile bridge_mcp.py test_suite.py test_agy_wakeup.py claude_chatter_mcp/*.py agy_wakeup/*.py
 
 # There is no containerized `run`: bridge_mcp.py's whole job is to read/write the
 # HOST's real ~/.claude/sessions and its real Unix sockets under

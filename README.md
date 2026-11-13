@@ -2,6 +2,8 @@
 
 `claude-chatter-mcp` lets MCP-compatible agents (built for **Google Antigravity**) exchange messages with Claude Code sessions. It speaks Claude Code's peer-messaging protocol (`SendMessage`/`ListAgents`): the bridge announces itself as a session and talks to other sessions over their Unix sockets. Non-blocking and authenticated.
 
+The protocol, storage and CLI core lives in the [`claude-chatter`](https://pypi.org/project/claude-chatter/) library (a dependency of this package); this repo adds the MCP server, the `agy` push priming and the plugin files on top.
+
 It ships three ways: as a plain MCP server (`bridge-mcp`), as a standalone daemon/CLI, and as an **Antigravity CLI (`agy`) plugin** that bundles the MCP server, a `PreInvocation` hook that primes push, a rules file and the `chatter` skill (see [Option 4](#option-4-antigravity-plugin-mcp-server--push-priming)).
 
 ## 🚀 Key Features
@@ -228,7 +230,9 @@ Execute single-shot operations directly from terminal:
 * `chatter-primed/` - which Antigravity conversations are primed for push, plus a retry marker (a failed priming is retried after 10 minutes).
 * `chatter-bin/bridge-mcp` - a stable symlink to this install, so the prime command can be allow-listed.
 
-**Settings:** `--name` or `CHATTER_SESSION_NAME` (alias `AGY_SESSION_NAME`) sets the session name; `--socket` or `CHATTER_BRIDGE_SOCKET` (alias `AGY_MCP_BRIDGE_SOCKET`) sets the bridge socket.
+**Settings:** `--name` or `CHATTER_SESSION_NAME` (alias `AGY_SESSION_NAME`) sets the session name; `--socket` or `CHATTER_BRIDGE_SOCKET` (alias `AGY_MCP_BRIDGE_SOCKET`) sets the bridge socket. `AGY_WAKEUP_PIN_AGY=1` makes push stop, and drop the stored credential, once the agy process that was primed has ended or its pid has been reused (off by default).
+
+**Packages:** the Antigravity push logic (prime command, `PreInvocation` hook, shell-side primer, control socket, `agentapi send-message` with delivery confirmation) lives in the self-contained `agy_wakeup` package in this repo, which does not import `claude_chatter_mcp`; the `agy-wakeup` command exposes its `--prime` and `--prime-hook` modes, and `claude_chatter_mcp/agy_glue.py` configures it for this bridge.
 
 **Security model:**
 * Peer tokens are read from each session's `.key` file and only used to authenticate outbound frames. `list_sessions` and `--list` do not print them.
