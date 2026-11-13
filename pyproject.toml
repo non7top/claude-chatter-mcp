@@ -11,12 +11,13 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
+    "claude-chatter>=0.2.1",
     "psutil>=5.9.0",
     "fastmcp>=4.0.10",
 ]
 
 [project.scripts]
-bridge-mcp = "claude_chatter.cli:main"
+bridge-mcp = "claude_chatter_mcp.cli:main"
 
 [tool.setuptools]
-packages = ["claude_chatter"]
+packages = ["claude_chatter_mcp"]

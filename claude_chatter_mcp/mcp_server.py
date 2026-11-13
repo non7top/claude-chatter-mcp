@@ -1,7 +1,7 @@
 """
 MCP stdio entry point built on FastMCP. FastMCP owns the JSON-RPC/stdio
 transport, tool schema generation, and standard notifications; this module
-wires ClaudeMessagingProtocol into it and holds nothing else.
+wires the claude-chatter ClaudeClient into it and holds nothing else.
 """
 import os
 import json
@@ -16,7 +16,8 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
-from .protocol import ClaudeMessagingProtocol
+from claude_chatter import ClaudeClient, list_jobs as _list_jobs
+
 from .prime import AgyPoker, control_socket_path, prime_command
 
 logger = logging.getLogger("SocketBridgeMCP")
@@ -108,10 +109,10 @@ class _LenientArgumentsMiddleware(Middleware):
         return await call_next(context.copy(message=context.message.model_copy(update={"arguments": cleaned})))
 
 
-def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
+def build_mcp_server(protocol: ClaudeClient) -> FastMCP:
     """
-    Builds a FastMCP server wired to the given protocol instance. A factory
-    rather than a module-level singleton so each process's protocol gets its
+    Builds a FastMCP server wired to the given client instance. A factory
+    rather than a module-level singleton so each process's client gets its
     own server with tools closed over it.
     """
     # Holds the most recently seen ServerSession so inbound socket activity
@@ -128,7 +129,7 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     # reference until each notification task finishes.
     background_tasks: set = set()
 
-    def notify_mcp_host(method: str, params: Dict[str, Any]):
+    def notify_mcp_host():
         session = last_session_holder["session"]
         if session is None:
             logger.warning("No MCP session captured yet; dropping host notification.")
@@ -147,9 +148,9 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     except psutil.Error:
         under_agy = False
 
-    def on_inbound(method: str, params: Dict[str, Any]):
-        notify_mcp_host(method, params)
-        poker.notify(params.get("sender", "unknown"))
+    def on_inbound(event: Dict[str, Any]):
+        notify_mcp_host()
+        poker.notify(event.get("sender", "unknown"))
 
     protocol.on_inbound_message = on_inbound
     control_path = control_socket_path(protocol.bridge_socket_path)
@@ -193,7 +194,6 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     @mcp.tool()
     async def list_jobs() -> str:
         """Lists Claude Code background jobs from ~/.claude/jobs (state, detail, needs, PR links, worktree, last activity), including finished ones with no live process."""
-        from .jobs import list_jobs as _list_jobs
         peers = await protocol.verify_and_purge_sessions()
         return json.dumps(_list_jobs(live_sessions=peers), indent=2)
 
@@ -241,7 +241,7 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     @mcp.tool()
     async def send_message(session: str, message: str) -> str:
         """Dispatches an authenticated user message to a target Claude Code session. Fire-and-forget: any real reply the target sends back arrives later as its own inbound activity, observable via read_messages - this does not wait for or return a reply."""
-        result = await protocol.send_to_claude(session_identifier=session, message_content=message)
+        result = await protocol.send_message(target_session=session, message_content=message)
         if not result.get("success", False):
             raise ToolError(result.get("error", "send_message failed"))
         return json.dumps(result, indent=2)
@@ -301,17 +301,19 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
 def make_protocol(
     bridge_socket_path: Optional[str],
     session_name: Optional[str],
-    db_path: Optional[str] = None
-) -> ClaudeMessagingProtocol:
-    return ClaudeMessagingProtocol(
+    db_path: Optional[str] = None,
+    project_path: Optional[str] = None
+) -> ClaudeClient:
+    return ClaudeClient(
         bridge_socket_path=bridge_socket_path,
         session_name=session_name,
         db_path=db_path,
-        as_bridge=True
+        as_bridge=True,
+        project_path=project_path
     )
 
 
-async def run_mcp_server(protocol: ClaudeMessagingProtocol):
+async def run_mcp_server(protocol: ClaudeClient):
     """
     SIGTERM has no default Python-level handler - unlike SIGINT, which the
     interpreter itself converts into a catchable KeyboardInterrupt, an

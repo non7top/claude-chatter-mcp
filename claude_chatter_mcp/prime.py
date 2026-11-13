@@ -51,7 +51,7 @@ def prime_command(stable_link: str = STABLE_LINK) -> str:
     bin_dir = os.path.dirname(sys.executable)
     script = os.path.join(bin_dir, "bridge-mcp")
     if not os.path.exists(script):
-        return f"{shlex.quote(sys.executable)} -m claude_chatter.cli --prime"
+        return f"{shlex.quote(sys.executable)} -m claude_chatter_mcp.cli --prime"
     # `uv run` puts the project venv's bin on this process's PATH only; the
     # agent's shell won't have it, so don't count that directory as "on PATH".
     other_dirs = [

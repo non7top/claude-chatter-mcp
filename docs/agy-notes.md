@@ -4,7 +4,7 @@ Constraints of the Antigravity CLI (`agy`) that shaped this bridge, the approach
 
 ## Constraints
 
-- **An MCP server cannot wake `agy`.** The only way to start a turn is `agy agentapi send-message`, which needs `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. `agy` puts those (and `ANTIGRAVITY_CONVERSATION_ID`) only into its agent's shell tool, never into MCP servers or hook processes (`claude_chatter/prime.py`, `claude_chatter/hook.py`).
+- **An MCP server cannot wake `agy`.** The only way to start a turn is `agy agentapi send-message`, which needs `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. `agy` puts those (and `ANTIGRAVITY_CONVERSATION_ID`) only into its agent's shell tool, never into MCP servers or hook processes (`claude_chatter_mcp/prime.py`, `claude_chatter_mcp/hook.py`).
 - **A hook cannot prime push by itself**, for the same reason: it has no token. The `PreInvocation` hook injects an `ephemeralMessage` that tells the agent to call `enable_push` and run the returned command in its own shell.
 - **Conversation titles are not exposed** to MCP servers, the shell environment, the status line payload or `agy agentapi get-conversation-metadata`. Requested upstream: google-antigravity/antigravity-cli#1415. Until then the bridge names a session `<project basename>-<2 random alphanumerics>`, stored per project path under `~/.claude/chatter-session-names/`; the project path is the `agy` process's working directory.
 - **Other MCP hosts send different parameter names** (and extra arguments such as `session_id`), so tool calls map known aliases onto the real arguments and drop unknown ones.
