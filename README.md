@@ -131,7 +131,7 @@ agy mcp add claudemessaging bridge-mcp
 
 ### Option 5: Antigravity plugin (MCP server + push priming)
 
-This repo is also an Antigravity CLI plugin: `plugin.json`, `mcp_config.json` (the MCP server), `hooks.json` (a `PreInvocation` hook that primes push, see below) and `rules/claude-chatter.md`.
+This repo is also an Antigravity CLI plugin: `plugin.json`, `mcp_config.json` (the MCP server), `hooks.json` (a `PreInvocation` hook that primes push and a `Stop` hook that sends idle notices, see below) and `rules/claude-chatter.md`.
 
 ```bash
 agy plugin install https://github.com/non7top/claude-chatter-mcp
@@ -156,6 +156,10 @@ Optional: set `AGY_WAKEUP_PIN_AGY=1` to also pin the agy process that was primed
 The bridge never edits agy's settings. If you want agy to stop asking before it runs the prime command, add a `command(...)` rule for it yourself (see agy's Permissions documentation); `~/.claude/chatter-bin/bridge-mcp` is the stable path to use.
 
 With the plugin installed, the `PreInvocation` hook (`bridge-mcp --prime-hook`) asks `agy` to run the priming command for any conversation that isn't primed yet, so the agent doesn't have to decide to. Whether `agy` honours that injected step is not yet verified; `rules/claude-chatter.md` and the `read_messages` `push_hint` are the fallbacks.
+
+### Idle notices
+
+A Claude Code session can ask to be told when this agy session next goes idle (the library's `notify_when_idle`). The plugin's `Stop` hook (`bridge-mcp --stop-hook`) runs when an agy turn ends; if no background work is left (`fullyIdle`), it tells the bridge under that `agy` over the same `.ctl` socket, and the bridge sends the pending subscribers one idle notice each. The hook always prints `{}` and never delays the agent: with no subscribers it does nothing, and every failure is swallowed. Needs a `claude-chatter` release that can publish idle notices; with an older one the bridge reports that over the socket and sends nothing.
 
 ---
 
