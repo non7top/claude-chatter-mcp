@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "claude-chatter>=0.2.1",
+    "antigravity-wakeup>=0.1.0",
     "psutil>=5.9.0",
     "fastmcp>=4.0.10",
 ]
@@ -39,7 +40,6 @@ Issues = "https://github.com/non7top/claude-chatter-mcp/issues"
 
 [project.scripts]
 bridge-mcp = "claude_chatter_mcp.cli:main"
-agy-wakeup = "agy_wakeup.cli:main"
 
 [tool.setuptools]
-packages = ["claude_chatter_mcp", "agy_wakeup"]
+packages = ["claude_chatter_mcp"]
