@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--socket", type=str, default=None, help="Path to bridge Unix socket")
     parser.add_argument("--name", type=str, default=None, help="Session name announced to Claude Code (default: derived from cwd, stable across restarts)")
     parser.add_argument("--db", type=str, default=None, help="Path to SQLite database for message persistence")
-    parser.add_argument("--project-path", type=str, default=None, help="Explicit project directory path")
+    parser.add_argument("--project-path", type=str, default=None, help="Explicit project directory path (default: CHATTER_PROJECT_PATH, else the directory the parent agy was started in, else the cwd)")
 
     mode_group = parser.add_argument_group("Execution Modes")
     mode_group.add_argument("--standalone", "--daemon", action="store_true", help="Run as standalone daemon server without stdio MCP loop")
@@ -90,8 +90,11 @@ def main():
         library_main()
         return
 
+    from .agy_glue import resolve_project_path
     from .mcp_server import run_mcp_server, make_protocol
-    protocol = make_protocol(args.socket, args.name, db_path=args.db, project_path=args.project_path)
+    protocol = make_protocol(
+        args.socket, args.name, db_path=args.db, project_path=resolve_project_path(args.project_path)
+    )
     try:
         asyncio.run(run_mcp_server(protocol))
     except (KeyboardInterrupt, SystemExit):

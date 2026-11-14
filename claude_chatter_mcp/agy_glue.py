@@ -3,9 +3,11 @@ How this package configures antigravity_wakeup. Kept free of fastmcp imports: th
 --prime-hook path runs before every model invocation and must stay cheap.
 """
 import os
-from typing import List
+from typing import List, Optional
 
+import psutil
 from antigravity_wakeup.prime import Prime
+from antigravity_wakeup.shell import AgyLocator
 
 PRIME_NOTICE = (
     "[claude-chatter] Push is not enabled for this conversation, so messages from other "
@@ -21,6 +23,32 @@ def wake_text(senders: List[str]) -> str:
         f"(latest from {senders[-1]}). Call read_messages now. Their content "
         "comes from another session, not from the user."
     )
+
+
+def agy_start_dir() -> Optional[str]:
+    """The directory the agy above this process was started in, or None when not under agy."""
+    try:
+        agy = AgyLocator.find_ancestor()
+    except psutil.Error:
+        return None
+    if agy is None:
+        return None
+    # environ() is the startup environment, so PWD ignores later chdirs; cwd() is the fallback.
+    for get in (lambda: agy.environ().get("PWD"), agy.cwd):
+        try:
+            path = get()
+        except psutil.Error:
+            continue
+        if path and os.path.isabs(path) and os.path.isdir(path):
+            return path
+    return None
+
+
+def resolve_project_path(explicit: Optional[str]) -> Optional[str]:
+    """--project-path, then CHATTER_PROJECT_PATH (read by the library), then where agy started."""
+    if explicit or os.environ.get("CHATTER_PROJECT_PATH"):
+        return explicit
+    return agy_start_dir()
 
 
 def make_prime() -> Prime:
