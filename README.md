@@ -12,7 +12,7 @@ This distribution installs two Python packages on top of the [`claude-chatter`](
 | --- | --- |
 | `claude-chatter` (separate PyPI library, a dependency) | The peer-messaging protocol: session discovery, socket transport, SQLite mailbox, jobs, and the `claude-chatter` / `chatter` CLI. |
 | `claude_chatter_mcp` | The MCP server and the `bridge-mcp` command. The plain CLI modes (`--list`, `--send`, `--inbox`, ...) are served by the library's CLI. |
-| `agy_wakeup` | Waking an idle Antigravity conversation: the prime command, the `PreInvocation` hook, the shell-side primer, the control socket and the `agentapi send-message` call. It does not import `claude_chatter_mcp`; `claude_chatter_mcp/agy_glue.py` configures it for this bridge. The `agy-wakeup` command exposes its `--prime` and `--prime-hook` modes. |
+| `antigravity-wakeup` (separate PyPI library, a dependency) | Waking an idle Antigravity conversation: the prime command, the `PreInvocation` hook, the shell-side primer, the control socket and the `agentapi send-message` call. It does not know about this bridge; `claude_chatter_mcp/agy_glue.py` configures it. Source: [non7top/antigravity-wakeup](https://github.com/non7top/antigravity-wakeup). |
 
 ## 🚀 Key Features
 
@@ -59,7 +59,7 @@ This distribution installs two Python packages on top of the [`claude-chatter`](
 # Zero-installation, register with Antigravity CLI (agy):
 agy mcp add claudemessaging uvx --from claude-chatter-mcp bridge-mcp
 
-# Or install the commands permanently (bridge-mcp, agy-wakeup, claude-chatter, chatter):
+# Or install the commands permanently (bridge-mcp, claude-chatter, chatter):
 uv tool install claude-chatter-mcp
 # or: pipx install claude-chatter-mcp
 agy mcp add claudemessaging bridge-mcp
@@ -283,7 +283,7 @@ Run the included unit and integration test suites in a disposable non-root conta
 make test
 ```
 
-This runs `test_suite.py` (MCP server, CLI) and `test_agy_wakeup.py` (the `agy_wakeup` package). The protocol and storage tests live in the `claude-chatter` library.
+This runs `test_suite.py` (MCP server, CLI). The protocol and storage tests live in the `claude-chatter` library, and the wake-up tests in `antigravity-wakeup`.
 
 ---
 

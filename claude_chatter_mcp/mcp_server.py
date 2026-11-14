@@ -18,8 +18,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
 from claude_chatter import ClaudeClient, list_jobs as _list_jobs
-from agy_wakeup.control import control_socket_path
-from agy_wakeup.prime import Prime
+from antigravity_wakeup.control import control_socket_path
+from antigravity_wakeup.prime import Prime
 
 from .agy_glue import make_prime
 

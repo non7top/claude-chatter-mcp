@@ -13,11 +13,10 @@ WORKDIR /app
 # the pip layer is cached independently of test_suite.py edits.
 COPY pyproject.toml README.md LICENSE bridge_mcp.py ./
 COPY claude_chatter_mcp/ ./claude_chatter_mcp/
-COPY agy_wakeup/ ./agy_wakeup/
 RUN pip install --no-cache-dir build pytest \
     && pip install --no-cache-dir .
 
-COPY test_suite.py test_agy_wakeup.py ./
+COPY test_suite.py ./
 
 # Give this container its OWN $HOME (with its own ~/.claude/sessions), entirely
 # separate from the host's. claude_chatter (the library) reads/writes ~/.claude/sessions for
@@ -29,4 +28,4 @@ RUN mkdir -p /home/appuser/.claude/sessions /home/appuser/.claude/projects \
 USER ${UID}:${GID}
 ENV HOME=/home/appuser
 
-CMD ["python", "-m", "pytest", "test_suite.py", "test_agy_wakeup.py", "-v"]
+CMD ["python", "-m", "pytest", "test_suite.py", "-v"]

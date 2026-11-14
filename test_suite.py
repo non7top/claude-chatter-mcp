@@ -606,7 +606,7 @@ class TestAgyGlue(unittest.TestCase):
     def test_prime_command_names_the_bridge_script_and_module(self):
         from claude_chatter_mcp.agy_glue import make_prime
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("agy_wakeup.command.sys.executable", os.path.join(tmp, "python3")):
+            with mock.patch("antigravity_wakeup.command.sys.executable", os.path.join(tmp, "python3")):
                 self.assertEqual(
                     make_prime().command(),
                     f"{os.path.join(tmp, 'python3')} -m claude_chatter_mcp.cli --prime"

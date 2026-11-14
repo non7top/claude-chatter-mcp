@@ -1,11 +1,11 @@
 """
-How this package configures agy_wakeup. Kept free of fastmcp imports: the
+How this package configures antigravity_wakeup. Kept free of fastmcp imports: the
 --prime-hook path runs before every model invocation and must stay cheap.
 """
 import os
 from typing import List
 
-from agy_wakeup.prime import Prime
+from antigravity_wakeup.prime import Prime
 
 PRIME_NOTICE = (
     "[claude-chatter] Push is not enabled for this conversation, so messages from other "
