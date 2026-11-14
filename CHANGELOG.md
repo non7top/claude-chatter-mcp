@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/non7top/claude-chatter-mcp/compare/v0.6.0...v0.7.0) (2026-11-14)
+
+
+### Features
+
+* **plugin:** pin the PyPI release in the plugin commands and bump it with release-please ([9826f2d](https://github.com/non7top/claude-chatter-mcp/commit/9826f2de28f72b7be76cc6fd87e20fcfacf0d7e2))
+* **plugin:** pin the PyPI release in the plugin commands and bump it with release-please ([65490a7](https://github.com/non7top/claude-chatter-mcp/commit/65490a70771f6337c2bcd644b2dcc9c3f96bfc9c))
+
+
+### Bug Fixes
+
+* **agy:** announce the agy start directory as the bridge's cwd ([d6d9be1](https://github.com/non7top/claude-chatter-mcp/commit/d6d9be176c34d29965e8543525267d34c4363522))
+* **agy:** announce the agy start directory as the bridge's cwd ([8913978](https://github.com/non7top/claude-chatter-mcp/commit/891397810be38bcb42850be9e18eb749d02134cb))
+
 ## [0.6.0](https://github.com/non7top/claude-chatter-mcp/compare/v0.5.0...v0.6.0) (2026-11-14)
 
 
