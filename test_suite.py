@@ -860,6 +860,55 @@ class TestBridgeIdleControl(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply, {"ok": True, "primed": False})
         self.poker.handle_request.assert_called_once_with({"op": "status"})
 
+    async def test_idle_op_reaches_a_subscriber_through_the_real_library(self):
+        from claude_chatter_mcp.idle import make_control_handler
+        with tempfile.TemporaryDirectory() as tmp:
+            client = ClaudeClient(
+                session_name="idle-e2e", bridge_socket_path=os.path.join(tmp, "bridge.sock"),
+                db_path=os.path.join(tmp, "m.db"), as_bridge=True, project_path=tmp
+            )
+            notices = []
+
+            async def subscriber(reader, writer):
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    notices.append(json.loads(line.decode("utf-8")))
+                writer.close()
+
+            reply_path = os.path.join(tmp, "sub.sock")
+            sub_server = await asyncio.start_unix_server(subscriber, reply_path)
+            listener = asyncio.create_task(client.start_bridge_listener())
+            try:
+                await asyncio.sleep(0.3)
+                sub_id = str(uuid.uuid4())
+                _, writer = await asyncio.open_unix_connection(client.bridge_socket_path)
+                frame = {"type": "control", "msgV": 1, "action": "notify_when_idle",
+                         "from": f"uds:{reply_path}", "msg_id": sub_id, "from_mode": "prompting"}
+                writer.write((json.dumps(frame) + "\n").encode("utf-8"))
+                await writer.drain()
+                writer.close()
+                await asyncio.sleep(0.3)
+                self.assertEqual(client.pending_idle_subscriptions(), 1)
+
+                reply = make_control_handler(client, self.poker)(
+                    {"op": "idle", "finished_at_ms": 5, "detail": "turn ended (NO_TOOL_CALL)"}
+                )
+                self.assertEqual(reply, {"ok": True, "pending": 1})
+                await asyncio.sleep(0.5)
+            finally:
+                listener.cancel()
+                sub_server.close()
+                await sub_server.wait_closed()
+                client.cleanup_socket()
+        control = [n for n in notices if n.get("type") == "control"]
+        self.assertEqual(len(control), 1)
+        self.assertEqual(control[0]["action"], "peer_idle_notice")
+        self.assertEqual(control[0]["orig_msg_id"], sub_id)
+        self.assertEqual(control[0]["finished_at"], 5)
+        self.assertEqual(control[0]["detail"], "turn ended (NO_TOOL_CALL)")
+
     async def test_a_library_without_idle_support_is_reported_not_crashed(self):
         from claude_chatter_mcp.idle import make_control_handler
         reply = make_control_handler(object(), self.poker)({"op": "idle"})
