@@ -695,15 +695,37 @@ class TestAgyProjectPath(unittest.TestCase):
             with mock.patch.dict(os.environ, {"CHATTER_PROJECT_PATH": "/from/env"}):
                 self.assertIsNone(resolve_project_path(None))
 
-    def test_bridge_cli_passes_the_resolved_path_to_the_client(self):
+    def _run_cli(self, argv, resolved, chdir_error=None):
         from claude_chatter_mcp import cli
-        with mock.patch.object(sys, "argv", ["bridge-mcp"]), \
-                mock.patch("claude_chatter_mcp.agy_glue.resolve_project_path", return_value="/resolved") as resolve, \
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch("claude_chatter_mcp.agy_glue.resolve_project_path", return_value=resolved) as resolve, \
                 mock.patch("claude_chatter_mcp.mcp_server.make_protocol") as make, \
                 mock.patch("claude_chatter_mcp.mcp_server.run_mcp_server", new=mock.Mock(return_value=None)), \
-                mock.patch("claude_chatter_mcp.cli.asyncio.run"):
+                mock.patch("claude_chatter_mcp.cli.asyncio.run"), \
+                mock.patch("claude_chatter_mcp.cli.os.chdir", side_effect=chdir_error) as chdir:
             cli.main()
+        return resolve, make, chdir
+
+    def test_bridge_cli_passes_the_resolved_path_to_the_client(self):
+        resolve, make, _ = self._run_cli(["bridge-mcp"], "/resolved")
         resolve.assert_called_once_with(None)
+        self.assertEqual(make.call_args.kwargs["project_path"], "/resolved")
+
+    def test_bridge_cli_moves_into_the_agy_start_directory(self):
+        _, _, chdir = self._run_cli(["bridge-mcp"], "/resolved")
+        chdir.assert_called_once_with("/resolved")
+
+    def test_bridge_cli_leaves_the_cwd_alone_for_an_explicit_project_path(self):
+        _, _, chdir = self._run_cli(["bridge-mcp", "--project-path", "/explicit"], "/explicit")
+        chdir.assert_not_called()
+
+    def test_bridge_cli_leaves_the_cwd_alone_outside_agy(self):
+        _, make, chdir = self._run_cli(["bridge-mcp"], None)
+        chdir.assert_not_called()
+        self.assertIsNone(make.call_args.kwargs["project_path"])
+
+    def test_bridge_cli_still_starts_when_the_directory_change_fails(self):
+        _, make, _ = self._run_cli(["bridge-mcp"], "/resolved", chdir_error=PermissionError("no"))
         self.assertEqual(make.call_args.kwargs["project_path"], "/resolved")
 
 
