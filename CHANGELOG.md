@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/non7top/claude-chatter-mcp/compare/v0.5.0...v0.6.0) (2026-11-14)
+
+
+### Features
+
+* **agy:** send idle notices from an agy Stop hook ([f18d1b2](https://github.com/non7top/claude-chatter-mcp/commit/f18d1b29e394aaec1c15f3d9d40cb065ce73f294))
+* **agy:** send idle notices from an agy Stop hook ([bd0e4a1](https://github.com/non7top/claude-chatter-mcp/commit/bd0e4a14e393878d8bb3b5c6fa6f4f5cfe2d2b76))
+
+
+### Bug Fixes
+
+* **agy:** take the project path from where the parent agy started ([ea130a1](https://github.com/non7top/claude-chatter-mcp/commit/ea130a190cffde4cc26bf6263052fa7b5e32a67d))
+* **agy:** take the project path from where the parent agy started ([6c0e9f6](https://github.com/non7top/claude-chatter-mcp/commit/6c0e9f66c48d4b9e10163a742167f125c42715e2))
+
 ## [0.5.0](https://github.com/non7top/claude-chatter-mcp/compare/v0.4.0...v0.5.0) (2026-11-13)
 
 
