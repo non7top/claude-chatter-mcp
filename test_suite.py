@@ -632,5 +632,80 @@ class TestAgyGlue(unittest.TestCase):
         self.assertIn("enable_push", step["ephemeralMessage"])
 
 
+class _FakeAgy:
+    def __init__(self, pwd=None, cwd="/", environ_error=None):
+        self._pwd, self._cwd, self._environ_error = pwd, cwd, environ_error
+
+    def environ(self):
+        if self._environ_error:
+            raise self._environ_error
+        return {"PWD": self._pwd} if self._pwd else {}
+
+    def cwd(self):
+        return self._cwd
+
+
+class TestAgyProjectPath(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.start_dir = os.path.join(self._tmp.name, "start")
+        self.moved_dir = os.path.join(self._tmp.name, "moved")
+        os.mkdir(self.start_dir)
+        os.mkdir(self.moved_dir)
+        env = {k: v for k, v in os.environ.items() if k != "CHATTER_PROJECT_PATH"}
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _under(self, agy):
+        return mock.patch("claude_chatter_mcp.agy_glue.AgyLocator.find_ancestor", return_value=agy)
+
+    def test_startup_pwd_wins_over_the_current_cwd(self):
+        from claude_chatter_mcp.agy_glue import agy_start_dir
+        with self._under(_FakeAgy(pwd=self.start_dir, cwd=self.moved_dir)):
+            self.assertEqual(agy_start_dir(), self.start_dir)
+
+    def test_falls_back_to_cwd_when_pwd_is_missing_or_stale(self):
+        from claude_chatter_mcp.agy_glue import agy_start_dir
+        with self._under(_FakeAgy(pwd=None, cwd=self.moved_dir)):
+            self.assertEqual(agy_start_dir(), self.moved_dir)
+        with self._under(_FakeAgy(pwd=os.path.join(self._tmp.name, "gone"), cwd=self.moved_dir)):
+            self.assertEqual(agy_start_dir(), self.moved_dir)
+        with self._under(_FakeAgy(pwd="relative/dir", cwd=self.moved_dir)):
+            self.assertEqual(agy_start_dir(), self.moved_dir)
+
+    def test_falls_back_to_cwd_when_environ_is_unreadable(self):
+        import psutil
+        from claude_chatter_mcp.agy_glue import agy_start_dir
+        with self._under(_FakeAgy(cwd=self.moved_dir, environ_error=psutil.AccessDenied(1))):
+            self.assertEqual(agy_start_dir(), self.moved_dir)
+
+    def test_none_when_not_under_agy(self):
+        from claude_chatter_mcp.agy_glue import agy_start_dir, resolve_project_path
+        with self._under(None):
+            self.assertIsNone(agy_start_dir())
+            self.assertIsNone(resolve_project_path(None))
+
+    def test_explicit_path_and_env_var_win_over_agy(self):
+        from claude_chatter_mcp.agy_glue import resolve_project_path
+        with self._under(_FakeAgy(pwd=self.start_dir)):
+            self.assertEqual(resolve_project_path("/explicit"), "/explicit")
+            self.assertEqual(resolve_project_path(None), self.start_dir)
+            with mock.patch.dict(os.environ, {"CHATTER_PROJECT_PATH": "/from/env"}):
+                self.assertIsNone(resolve_project_path(None))
+
+    def test_bridge_cli_passes_the_resolved_path_to_the_client(self):
+        from claude_chatter_mcp import cli
+        with mock.patch.object(sys, "argv", ["bridge-mcp"]), \
+                mock.patch("claude_chatter_mcp.agy_glue.resolve_project_path", return_value="/resolved") as resolve, \
+                mock.patch("claude_chatter_mcp.mcp_server.make_protocol") as make, \
+                mock.patch("claude_chatter_mcp.mcp_server.run_mcp_server", new=mock.Mock(return_value=None)), \
+                mock.patch("claude_chatter_mcp.cli.asyncio.run"):
+            cli.main()
+        resolve.assert_called_once_with(None)
+        self.assertEqual(make.call_args.kwargs["project_path"], "/resolved")
+
+
 if __name__ == "__main__":
     unittest.main()
