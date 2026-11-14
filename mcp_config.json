@@ -2,7 +2,7 @@
   "mcpServers": {
     "bridge": {
       "command": "sh",
-      "args": ["-c", "exec uvx --from claude-chatter-mcp==0.6.0 bridge-mcp # x-release-please-version"]
+      "args": ["-c", "exec uvx --from claude-chatter-mcp==0.7.0 bridge-mcp # x-release-please-version"]
     }
   }
 }

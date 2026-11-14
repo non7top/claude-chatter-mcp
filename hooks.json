@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "uvx --from claude-chatter-mcp==0.6.0 bridge-mcp --prime-hook # x-release-please-version",
+        "command": "uvx --from claude-chatter-mcp==0.7.0 bridge-mcp --prime-hook # x-release-please-version",
         "timeout": 30
       }
     ]
@@ -12,7 +12,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "uvx --from claude-chatter-mcp==0.6.0 bridge-mcp --stop-hook # x-release-please-version",
+        "command": "uvx --from claude-chatter-mcp==0.7.0 bridge-mcp --stop-hook # x-release-please-version",
         "timeout": 10
       }
     ]
