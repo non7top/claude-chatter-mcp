@@ -938,5 +938,47 @@ class TestBridgeIdleControl(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cannot publish idle notices", reply["error"])
 
 
+class TestPluginPins(unittest.TestCase):
+    """The plugin's commands pin the PyPI release; the release PR must bump every pin together."""
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+    PIN = re.compile(r"claude-chatter-mcp==(\d+\.\d+\.\d+)")
+
+    def _read(self, name):
+        with open(os.path.join(self.ROOT, name), "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _pin_lines(self):
+        lines = []
+        for name in ("mcp_config.json", "hooks.json"):
+            lines += [(name, line) for line in self._read(name).splitlines() if "claude-chatter-mcp==" in line]
+        return lines
+
+    def test_three_commands_are_pinned(self):
+        self.assertEqual(sorted(name for name, _ in self._pin_lines()), ["hooks.json", "hooks.json", "mcp_config.json"])
+
+    def test_every_pin_is_the_project_version(self):
+        version = re.search(r'^version = "(\d+\.\d+\.\d+)"', self._read("pyproject.toml"), re.M).group(1)
+        for name, line in self._pin_lines():
+            self.assertEqual(self.PIN.search(line).group(1), version, f"{name}: {line.strip()}")
+
+    def test_every_pin_line_carries_the_release_please_annotation(self):
+        for name, line in self._pin_lines():
+            self.assertIn("x-release-please-version", line, f"{name}: {line.strip()}")
+
+    def test_release_please_updates_both_files_with_the_generic_updater(self):
+        config = json.loads(self._read("release-please-config.json"))
+        extra = config["packages"]["."]["extra-files"]
+        self.assertEqual(
+            sorted((e["path"], e["type"]) for e in extra),
+            [("hooks.json", "generic"), ("mcp_config.json", "generic")]
+        )
+
+    def test_the_mcp_server_still_replaces_the_shell_with_uvx(self):
+        server = json.loads(self._read("mcp_config.json"))["mcpServers"]["bridge"]
+        self.assertEqual(server["command"], "sh")
+        self.assertEqual(server["args"][0], "-c")
+        self.assertTrue(server["args"][1].startswith("exec uvx --from claude-chatter-mcp=="))
+
+
 if __name__ == "__main__":
     unittest.main()
