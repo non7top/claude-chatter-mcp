@@ -7,6 +7,10 @@
       "include-component-in-tag": false,
       "bump-minor-pre-major": true,
       "bootstrap-sha": "456fca82487e1a647136baf56203f968800b5504",
+      "extra-files": [
+        { "type": "generic", "path": "mcp_config.json" },
+        { "type": "generic", "path": "hooks.json" }
+      ],
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },

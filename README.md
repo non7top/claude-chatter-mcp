@@ -137,7 +137,7 @@ This repo is also an Antigravity CLI plugin: `plugin.json`, `mcp_config.json` (t
 agy plugin install https://github.com/non7top/claude-chatter-mcp
 ```
 
-Only `uv` needs to be installed: the plugin's MCP server and hook run `uvx --from git+https://github.com/non7top/claude-chatter-mcp bridge-mcp`, which fetches and caches the bridge on first use.
+Only `uv` needs to be installed: the plugin's MCP server and hooks run `uvx --from claude-chatter-mcp==<release> bridge-mcp`, which installs that PyPI release into uv's cache on first use and reuses it afterwards. All three commands carry the same pinned version, which the release PR bumps (`extra-files` in `release-please-config.json`); a new release reaches an installed plugin when the plugin is updated or reinstalled.
 
 If you registered the server by hand earlier (`agy mcp add ...`), remove it so the plugin's copy is the only one.
 
