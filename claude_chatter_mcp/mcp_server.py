@@ -18,10 +18,11 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
 from claude_chatter import ClaudeClient, list_jobs as _list_jobs
-from antigravity_wakeup.control import control_socket_path
+from antigravity_wakeup.control import ControlServer, control_socket_path
 from antigravity_wakeup.prime import Prime
 
 from .agy_glue import make_prime
+from .idle import make_control_handler
 
 logger = logging.getLogger("SocketBridgeMCP")
 
@@ -170,7 +171,9 @@ def build_mcp_server(protocol: ClaudeClient, prime: Optional[Prime] = None) -> F
     async def _lifespan(server: FastMCP):
         protocol.register_session_descriptor(session_name=protocol.session_name, kind="bg")
         listener_task = asyncio.create_task(protocol.start_bridge_listener())
-        control_task = asyncio.create_task(poker.serve_control_socket(control_path))
+        control_task = asyncio.create_task(
+            ControlServer(make_control_handler(protocol, poker)).serve(control_path)
+        )
         try:
             yield
         finally:

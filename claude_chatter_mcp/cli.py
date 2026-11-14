@@ -69,9 +69,15 @@ def main():
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--prime", action="store_true", help="From an Antigravity shell tool: hand this agy's push endpoint to its bridge so it can wake the session on inbound messages")
     mode_group.add_argument("--prime-hook", action="store_true", help="Antigravity PreInvocation hook: reads hook JSON on stdin and prints the JSON that makes the session prime push (see --prime)")
+    mode_group.add_argument("--stop-hook", action="store_true", help="Antigravity Stop hook: reads hook JSON on stdin and tells this agy's bridge the turn ended, so it can send idle notices to sessions that subscribed with notify_when_idle")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
     args = parser.parse_args()
+
+    if args.stop_hook:
+        from .idle import run_stop_hook
+        print(run_stop_hook(sys.stdin.read()))
+        sys.exit(0)
 
     if args.prime_hook or args.prime:
         from .agy_glue import make_prime
