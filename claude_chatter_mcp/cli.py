@@ -98,9 +98,14 @@ def main():
 
     from .agy_glue import resolve_project_path
     from .mcp_server import run_mcp_server, make_protocol
-    protocol = make_protocol(
-        args.socket, args.name, db_path=args.db, project_path=resolve_project_path(args.project_path)
-    )
+    project_path = resolve_project_path(args.project_path)
+    if project_path and not args.project_path:
+        # The announced descriptor's cwd is the process cwd, and agy launches a plugin's server from the plugin dir.
+        try:
+            os.chdir(project_path)
+        except OSError as e:
+            logger.warning(f"Could not change to the agy start directory {project_path}: {e}")
+    protocol = make_protocol(args.socket, args.name, db_path=args.db, project_path=project_path)
     try:
         asyncio.run(run_mcp_server(protocol))
     except (KeyboardInterrupt, SystemExit):
