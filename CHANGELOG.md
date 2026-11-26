@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.1](https://github.com/non7top/claude-chatter-mcp/compare/v0.7.0...v0.7.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **agy:** run the prime command with the terminal sandbox bypassed ([8e79c9e](https://github.com/non7top/claude-chatter-mcp/commit/8e79c9e3c66d3195a2207d935f49c60846edb4e8))
+* **agy:** tell the agent to run the prime command with the terminal sandbox bypassed ([bd5d71f](https://github.com/non7top/claude-chatter-mcp/commit/bd5d71f16e68258d4fb9ba21c50dc0aa2097b343))
+* **deps:** cap 0.x dependencies to minor versions ([a246651](https://github.com/non7top/claude-chatter-mcp/commit/a2466519810c212bbc567324e5ea77a23fdb37b5))
+* **deps:** cap 0.x dependencies to minor versions ([1b64617](https://github.com/non7top/claude-chatter-mcp/commit/1b646178720d6f08de4fb988ee223eced127e0ea))
+
 ## [0.7.0](https://github.com/non7top/claude-chatter-mcp/compare/v0.6.0...v0.7.0) (2026-11-14)
 
 
