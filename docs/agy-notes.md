@@ -5,13 +5,14 @@ Constraints of the Antigravity CLI (`agy`) that shaped this bridge, the approach
 ## Constraints
 
 - **An MCP server cannot wake `agy`.** The only way to start a turn is `agy agentapi send-message`, which needs `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. `agy` puts those (and `ANTIGRAVITY_CONVERSATION_ID`) only into its agent's shell tool, never into MCP servers or hook processes (the `antigravity-wakeup` package).
+- **The prime command cannot run inside agy's terminal sandbox.** The sandbox mounts only the workspace, temp directories and agy's own folders, so `~/.claude` (the stable link, `sessions/`), `/run/user/<uid>/cc-socks` (the bridge control socket) and the `uv` install are invisible there. A sandboxed run fails with "No such file or directory"; run with the sandbox bypassed it succeeds. Every prime instruction (hook notice, `enable_push`, `read_messages` hint, rules, skill) says so.
 - **A hook cannot prime push by itself**, for the same reason: it has no token. The `PreInvocation` hook injects an `ephemeralMessage` that tells the agent to call `enable_push` and run the returned command in its own shell.
 - **Conversation titles are not exposed** to MCP servers, the shell environment, the status line payload or `agy agentapi get-conversation-metadata`. Requested upstream: google-antigravity/antigravity-cli#1415. Until then the bridge names a session `<project basename>-<2 random alphanumerics>`, stored per project path under `~/.claude/chatter-session-names/`; the project path is `--project-path`, else `CHATTER_PROJECT_PATH`, else the directory the parent `agy` was started in (its startup `PWD`, then its cwd), else the bridge's own cwd. A plugin's MCP server is launched from the plugin's own directory, so the bridge's own cwd is not the workspace.
 - **Other MCP hosts send different parameter names** (and extra arguments such as `session_id`), so tool calls map known aliases onto the real arguments and drop unknown ones.
 
 ## How push works
 
-1. The agent calls `enable_push` and runs the returned `bridge-mcp --prime` command from its shell.
+1. The agent calls `enable_push` and runs the returned `bridge-mcp --prime` command from its shell, with the sandbox bypassed.
 2. `--prime` reads its own `ANTIGRAVITY_*` environment and sends it to its bridge over a `0600` control socket (`<bridge socket>.ctl`). The address must be loopback; the token is held in memory only and reaches the `agy` child through its environment, never argv, logs or disk.
 3. Each buffered inbound message makes the bridge run `agy agentapi send-message` with a fixed notice. No sender-written text is injected. Sends are debounced (1 s default) and time out after 20 s.
 4. A marker `~/.claude/chatter-primed/<conversation>.json` records the bridge pid. The hook skips conversations whose bridge is alive, and after a failed attempt it waits 10 minutes before asking again.
