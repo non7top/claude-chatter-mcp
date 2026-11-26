@@ -556,6 +556,7 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
         result = await self.read_messages(["uv", "agy", "bash"])
         self.assertEqual(result["messages"], {})
         self.assertIn("enable_push", result["push_hint"])
+        self.assertIn("sandbox bypassed", result["push_hint"])
 
     async def call_enable_push(self, arguments=None):
         from fastmcp import Client
@@ -590,6 +591,7 @@ class TestReadMessagesPushHint(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["primed"])
         self.assertIn("--prime", result["command"])
         self.assertIn("Run `command` in your shell tool", result["next_step"])
+        self.assertIn("sandbox bypassed", result["next_step"])
 
     async def test_no_hint_outside_agy(self):
         result = await self.read_messages(["claude", "bash"])
@@ -630,6 +632,7 @@ class TestAgyGlue(unittest.TestCase):
             )
         step = json.loads(res.stdout)["injectSteps"][0]
         self.assertIn("enable_push", step["ephemeralMessage"])
+        self.assertIn("sandbox bypassed", step["ephemeralMessage"])
 
 
 class _FakeAgy:

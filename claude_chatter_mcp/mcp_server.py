@@ -21,7 +21,7 @@ from claude_chatter import ClaudeClient, list_jobs as _list_jobs
 from antigravity_wakeup.control import ControlServer, control_socket_path
 from antigravity_wakeup.prime import Prime
 
-from .agy_glue import make_prime
+from .agy_glue import SANDBOX_NOTE, make_prime
 from .idle import make_control_handler
 
 logger = logging.getLogger("SocketBridgeMCP")
@@ -269,20 +269,20 @@ def build_mcp_server(protocol: ClaudeClient, prime: Optional[Prime] = None) -> F
         if under_agy and not poker.primed:
             result["push_hint"] = (
                 "Push is not primed, so nothing can wake you when a message arrives. "
-                "Call enable_push once and run the shell command it returns."
+                "Call enable_push once and run the shell command it returns. " + SANDBOX_NOTE
             )
         return json.dumps(result, indent=2)
 
     @mcp.tool()
     async def enable_push() -> str:
-        """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you. Also reports whether push is already primed."""
+        """Returns a shell command that, run once in your shell tool, lets this bridge wake you when a message arrives (via agy agentapi). It needs your shell's ANTIGRAVITY_* environment, which MCP servers never receive, so it cannot be run for you, and it must run outside the terminal sandbox, which hides the files it needs. Also reports whether push is already primed."""
         command = prime.command()
         result: Dict[str, Any] = {"primed": poker.primed, "last_error": poker.last_error, "command": command}
         if not poker.primed:
             result["next_step"] = (
                 "Run `command` in your shell tool now, exactly as given. Nothing is primed until you do. "
                 "It prints JSON with ok=true on success and never prints the token; do not write the "
-                "token anywhere. Then end your turn instead of polling."
+                "token anywhere. " + SANDBOX_NOTE + " Then end your turn instead of polling."
             )
         return json.dumps(result, indent=2)
 

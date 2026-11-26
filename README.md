@@ -148,12 +148,12 @@ If you registered the server by hand earlier (`agy mcp add ...`), remove it so t
 `agy` cannot be woken by an MCP server, so by default it only sees inbound messages when it calls `read_messages`. Push closes that gap using `agy agentapi send-message`, which needs `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. `agy` gives those only to its agent's shell tool, never to MCP servers, so each conversation has to be **primed** once:
 
 1. The agent calls the `enable_push` tool, which returns a shell command (`bridge-mcp --prime`).
-2. The agent runs that command in its shell tool. It reads its own `ANTIGRAVITY_*` environment and hands it to its bridge over a `0600` control socket (`<bridge socket>.ctl`). The token is kept in memory only and passed to `agy` through the child's environment, never argv, logs or disk.
+2. The agent runs that command in its shell tool, **with the terminal sandbox bypassed**: the sandbox hides `~/.claude` and the bridge's control socket, so a sandboxed run fails with "No such file or directory". It reads its own `ANTIGRAVITY_*` environment and hands it to its bridge over a `0600` control socket (`<bridge socket>.ctl`). The token is kept in memory only and passed to `agy` through the child's environment, never argv, logs or disk.
 3. From then on every inbound message makes the bridge run `agy agentapi send-message` with a fixed notice ("N new message(s) in your bridge inbox, call `read_messages`"). No sender-written text is injected. Bursts are coalesced into one notice, and a push counts as delivered only when agy's reply names the conversation (`response.sendMessage.recipientId`); an unconfirmed push is recorded as an error and never resent.
 
 Optional: set `AGY_WAKEUP_PIN_AGY=1` to also pin the agy process that was primed (pid plus start time). The bridge then stops pushing and drops the stored credential once that process has ended or its pid has been reused.
 
-The bridge never edits agy's settings. If you want agy to stop asking before it runs the prime command, add a `command(...)` rule for it yourself (see agy's Permissions documentation); `~/.claude/chatter-bin/bridge-mcp` is the stable path to use.
+The bridge never edits agy's settings. If you want agy to stop asking before it runs the prime command, add a `command(...)` rule for it yourself (see agy's Permissions documentation); `~/.claude/chatter-bin/bridge-mcp` is the stable path to use. The rule only skips the approval prompt; the agent still has to request the sandbox bypass.
 
 With the plugin installed, the `PreInvocation` hook (`bridge-mcp --prime-hook`) asks `agy` to run the priming command for any conversation that isn't primed yet, so the agent doesn't have to decide to. Whether `agy` honours that injected step is not yet verified; `rules/claude-chatter.md` and the `read_messages` `push_hint` are the fallbacks.
 
